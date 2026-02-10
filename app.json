@@ -1,0 +1,24 @@
+{
+  "name": "PlanetScale Migration",
+  "description": "Migrate from Heroku Postgres to PlanetScale using Bucardo replication",
+  "stack": "container",
+  "env": {
+    "HEROKU_URL": {
+      "description": "Heroku Postgres connection URL (e.g. postgres://user:pass@host:5432/dbname)",
+      "required": true
+    },
+    "PLANETSCALE_URL": {
+      "description": "PlanetScale Postgres connection URL (e.g. postgres://user:pass@host:5432/dbname?sslmode=require)",
+      "required": true
+    },
+    "PASSWORD": {
+      "description": "Password to access the migration dashboard",
+      "required": true
+    }
+  },
+  "formation": {
+    "web": {
+      "size": "standard-2x"
+    }
+  }
+}

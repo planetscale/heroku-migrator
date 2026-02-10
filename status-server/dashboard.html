@@ -1,0 +1,1752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PlanetScale Migration</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #111111;
+      color: #fafafa;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      font-weight: 400;
+      line-height: 1.6;
+    }
+
+    a { color: #1e9de7; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 32px 16px;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+    .header-left { display: flex; align-items: center; gap: 10px; }
+    .header-left svg { flex-shrink: 0; }
+    .header h1 { font-size: 20px; font-weight: 600; }
+    .header-right { display: flex; align-items: center; gap: 16px; }
+    .last-updated { font-size: 12px; color: #616161; }
+    .help-link { font-size: 12px; color: #a1a1a1; }
+    .help-link:hover { color: #1e9de7; }
+
+    /* Cards */
+    .card {
+      background: #1a1a1a;
+      border: 1px solid #2b2b2b;
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 16px;
+    }
+    .card-title {
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: #a1a1a1;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-size: 12px;
+    }
+    .compact-card { padding: 16px 20px; }
+
+    /* Current action banner */
+    .next-action {
+      border-left: 3px solid #2b2b2b;
+      padding-left: 18px;
+    }
+    .next-action.next-blue { border-left-color: #1e9de7; }
+    .next-action.next-green { border-left-color: #27b648; }
+    .next-action.next-yellow { border-left-color: #a78103; }
+    .next-action.next-orange { border-left-color: #f35815; }
+    .next-action.next-red { border-left-color: #ff455d; }
+    .next-action-main {
+      color: #fafafa;
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .next-action-sub {
+      color: #a1a1a1;
+      font-size: 13px;
+    }
+
+    /* In-page action feedback */
+    .action-result {
+      border-left: 3px solid #2b2b2b;
+      display: none;
+    }
+    .action-result.show { display: block; }
+    .action-result.success { border-left-color: #27b648; }
+    .action-result.warning { border-left-color: #a78103; }
+    .action-result.error { border-left-color: #ff455d; }
+    .action-result-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .action-result-title {
+      color: #fafafa;
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .action-result-body {
+      color: #a1a1a1;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .action-raw {
+      margin-top: 10px;
+    }
+    .action-raw summary {
+      cursor: pointer;
+      color: #a1a1a1;
+      font-size: 12px;
+    }
+    .action-raw pre {
+      margin-top: 8px;
+      max-height: 180px;
+      overflow: auto;
+      background: #111111;
+      border: 1px solid #2b2b2b;
+      border-radius: 6px;
+      padding: 10px;
+      color: #d1d1d1;
+      font-family: 'Roboto Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 11px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* Card actions */
+    .card-actions {
+      margin-top: 14px;
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    /* Guide card */
+    .guide-card {
+      padding: 24px 24px 24px 27px;
+      border-left: 3px solid #2b2b2b;
+    }
+    .guide-card.accent-blue { border-left-color: #1e9de7; }
+    .guide-card.accent-green { border-left-color: #27b648; }
+    .guide-card.accent-yellow { border-left-color: #a78103; }
+    .guide-card.accent-orange { border-left-color: #f35815; }
+    .guide-card.accent-red { border-left-color: #ff455d; }
+
+    .guide-step {
+      font-size: 12px;
+      font-weight: 500;
+      color: #a1a1a1;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+    .guide-body {
+      font-size: 14px;
+      color: #a1a1a1;
+      line-height: 1.7;
+    }
+    .guide-body p { margin-bottom: 12px; }
+    .guide-body p:last-child { margin-bottom: 0; }
+
+    /* Checklist in guide */
+    .guide-checklist {
+      list-style: none;
+      margin: 16px 0;
+      padding: 0;
+    }
+    .guide-checklist li {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 14px;
+      align-items: flex-start;
+    }
+    .guide-checklist li:last-child { margin-bottom: 0; }
+    .step-num {
+      width: 22px;
+      height: 22px;
+      border: 1px solid #2b2b2b;
+      border-radius: 50%;
+      font-size: 11px;
+      font-weight: 600;
+      color: #a1a1a1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .step-text {
+      font-size: 14px;
+      color: #fafafa;
+      line-height: 1.6;
+    }
+
+    /* Inline code in guide */
+    .guide-body code, .step-text code {
+      background: #111111;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'Roboto Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: #a1a1a1;
+    }
+
+    /* Code block in guide */
+    .guide-code {
+      background: #111111;
+      border: 1px solid #2b2b2b;
+      border-radius: 6px;
+      padding: 12px 16px;
+      margin: 12px 0;
+      font-family: 'Roboto Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: #a1a1a1;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* Callout in guide */
+    .guide-callout {
+      border-left: 3px solid #a78103;
+      background: rgba(167, 129, 3, 0.08);
+      padding: 12px 16px;
+      border-radius: 0 6px 6px 0;
+      margin: 16px 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #a1a1a1;
+    }
+    .guide-callout-info {
+      border-left-color: #1e9de7;
+      background: rgba(30, 157, 231, 0.08);
+    }
+
+    /* Guide actions (buttons within guide) */
+    .guide-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 20px;
+    }
+
+    /* Badges */
+    .badge {
+      display: inline-block;
+      border-radius: 9999px;
+      padding: 4px 12px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .badge-blue { background: #0a1a2a; color: #1e9de7; }
+    .badge-green { background: #0a2a12; color: #27b648; }
+    .badge-yellow { background: #2a2208; color: #a78103; }
+    .badge-orange { background: #2a1608; color: #f35815; }
+    .badge-red { background: #2a0a10; color: #ff455d; }
+    .badge-gray { background: #1a1a1a; color: #616161; }
+
+    /* Key-value pairs */
+    .kv-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .kv-label {
+      color: #a1a1a1;
+      font-size: 12px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+    .kv-value {
+      color: #fafafa;
+      font-size: 14px;
+    }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 6px;
+      padding: 8px 16px;
+      font-size: 14px;
+      font-weight: 500;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+      border: none;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: #fafafa; color: #111111; }
+    .btn-primary:hover:not(:disabled) { background: #e1e1e1; }
+    .btn-secondary { background: transparent; color: #fafafa; border: 1px solid #2b2b2b; }
+    .btn-secondary:hover:not(:disabled) { background: #1a1a1a; }
+    .btn-danger { background: transparent; color: #ff455d; border: 1px solid #ff455d; }
+    .btn-danger:hover:not(:disabled) { background: #2a0a10; }
+    .btn-sm { padding: 6px 12px; font-size: 12px; }
+
+    /* Tables */
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      color: #a1a1a1;
+      font-weight: 500;
+      text-align: left;
+      padding: 8px 12px;
+      border-bottom: 1px solid #2b2b2b;
+      font-size: 12px;
+    }
+    td {
+      padding: 8px 12px;
+      border-bottom: 1px solid #2b2b2b;
+    }
+    .text-green { color: #27b648; }
+    .text-red { color: #ff455d; }
+    .text-secondary { color: #a1a1a1; }
+    .text-muted { color: #616161; }
+    .error-text { color: #ff455d; }
+
+    /* Mono */
+    .mono {
+      font-family: 'Roboto Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+
+    /* Collapsible */
+    .collapsible-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: default;
+      user-select: none;
+    }
+    .collapsible-header .arrow {
+      transition: transform 0.2s;
+      color: #616161;
+      font-size: 12px;
+    }
+    .collapsible-header.open .arrow { transform: rotate(90deg); }
+    .collapsible-body { display: block; margin-top: 16px; }
+    .collapsible-body.open { display: block; }
+
+    /* Log blocks */
+    .log-block {
+      background: #111111;
+      border: 1px solid #2b2b2b;
+      border-radius: 6px;
+      padding: 16px;
+      margin-bottom: 0;
+      max-height: 380px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      font-family: 'Roboto Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: #d1d1d1;
+      line-height: 1.5;
+    }
+    .log-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+    .log-panel {
+      border: 1px solid #2b2b2b;
+      border-radius: 6px;
+      padding: 10px;
+      background: #141414;
+    }
+    .log-panel .log-label {
+      margin-bottom: 8px;
+    }
+    .logs-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .logs-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #a1a1a1;
+      font-size: 12px;
+    }
+    .logs-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #27b648;
+      flex-shrink: 0;
+    }
+    .logs-updated {
+      color: #616161;
+      font-size: 12px;
+    }
+    .log-label {
+      font-size: 12px;
+      font-weight: 500;
+      color: #616161;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+
+    /* Simple spinner (for buttons) */
+    .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid #2b2b2b;
+      border-top-color: #fafafa;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+    }
+    .spinner-dark { border-top-color: #111111; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* PlanetScale spinner (for guide states) */
+    .ps-spinner {
+      flex-shrink: 0;
+      animation: ps-spin 1.33s linear infinite;
+    }
+    @keyframes ps-spin { 100% { transform: rotate(360deg); } }
+    .ps-spinner .ps-spinner-line {
+      animation: ps-dash 4s ease-in-out infinite;
+    }
+    @keyframes ps-dash {
+      75%, 100% { stroke-dasharray: .5, 1; stroke-dashoffset: -.8; }
+    }
+
+    /* Green sync pulse dot */
+    .sync-dot {
+      width: 10px;
+      height: 10px;
+      background: #27b648;
+      border-radius: 50%;
+      flex-shrink: 0;
+      position: relative;
+    }
+    .sync-dot::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background: #27b648;
+      animation: sync-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+    }
+    @keyframes sync-ping {
+      0% { transform: scale(1); opacity: 0.6; }
+      100% { transform: scale(2.5); opacity: 0; }
+    }
+
+    /* Guide title with indicator */
+    .guide-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: #fafafa;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* Progress bar */
+    .progress-bar {
+      width: 100%;
+      height: 6px;
+      background: #2b2b2b;
+      border-radius: 3px;
+      margin: 12px 0;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: #1e9de7;
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+
+    .copy-estimate {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: #151515;
+      border: 1px solid #2b2b2b;
+      border-radius: 6px;
+      display: none;
+    }
+    .copy-estimate-title {
+      font-size: 12px;
+      color: #a1a1a1;
+      margin-bottom: 6px;
+    }
+    .copy-estimate-note {
+      font-size: 11px;
+      color: #616161;
+      margin-top: 4px;
+    }
+    .progress-checklist {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 6px;
+    }
+    .progress-check-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+      color: #d1d1d1;
+    }
+    .progress-check-item .status {
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      font-size: 11px;
+      color: #a1a1a1;
+    }
+    .stall-warning {
+      margin-top: 10px;
+      padding: 8px 10px;
+      border-left: 3px solid #a78103;
+      background: rgba(167, 129, 3, 0.08);
+      border-radius: 0 6px 6px 0;
+      font-size: 12px;
+      color: #d1d1d1;
+    }
+
+    /* Row update flash animation */
+    @keyframes row-flash {
+      0% { background: rgba(30, 157, 231, 0.15); }
+      100% { background: transparent; }
+    }
+    tr.row-updated {
+      animation: row-flash 1s ease-out;
+    }
+
+    /* Modal overlay */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: #1a1a1a;
+      border: 1px solid #2b2b2b;
+      border-radius: 8px;
+      padding: 24px;
+      max-width: 480px;
+      width: 90%;
+    }
+    .modal h3 { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+    .modal p { color: #a1a1a1; font-size: 14px; margin-bottom: 20px; line-height: 1.6; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+    /* Help footer */
+    .help-footer {
+      text-align: center;
+      color: #616161;
+      font-size: 13px;
+      padding: 24px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <!-- Header -->
+    <div class="header">
+      <div class="header-left">
+        <svg width="24" height="24" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M-0.0981445 16C-0.0981438 7.16344 7.0653 -7.52254e-07 15.9019 0C22.399 5.67998e-07 27.9917 3.87258 30.4975 9.43544L9.3373 30.5956C8.42926 30.1866 7.56625 29.6953 6.75778 29.1313L19.8891 16H15.9019L4.58815 27.3137C1.69272 24.4183 -0.0981449 20.4183 -0.0981445 16Z" fill="currentColor"/>
+          <path d="M31.9019 16.0055L15.9074 32C24.7396 31.997 31.8989 24.8377 31.9019 16.0055Z" fill="currentColor"/>
+        </svg>
+        <h1>PlanetScale Migration</h1>
+      </div>
+      <div class="header-right">
+        <a href="https://planetscale.com/contact" target="_blank" class="help-link">Need help?</a>
+        <span id="lastUpdated" class="last-updated"></span>
+      </div>
+    </div>
+
+    <!-- Current Action Banner -->
+    <div class="card compact-card next-action next-blue" id="nextActionCard">
+      <div class="card-title" style="margin-bottom:8px;">Current Action</div>
+      <div class="next-action-main" id="nextActionMain">Loading migration status...</div>
+      <div class="next-action-sub" id="nextActionSub">Checking current phase and recommended next step.</div>
+    </div>
+
+    <!-- Guide Card -->
+    <div class="card guide-card" id="guideCard">
+      <div class="guide-step" id="guideStep">--</div>
+      <h2 class="guide-title"><span id="guideIndicator"></span><span id="guideTitle">Loading...</span></h2>
+      <div class="guide-body" id="guideBody"></div>
+    </div>
+
+    <!-- Action Result -->
+    <div class="card action-result" id="actionResultCard">
+      <div class="action-result-header">
+        <div class="action-result-title" id="actionResultTitle">Action result</div>
+        <button class="btn btn-secondary btn-sm" onclick="dismissActionResult()">Dismiss</button>
+      </div>
+      <div class="action-result-body" id="actionResultBody"></div>
+      <div id="actionResultRawWrap" style="display:none;">
+        <details class="action-raw">
+          <summary>View raw output</summary>
+          <pre id="actionResultRaw"></pre>
+        </details>
+      </div>
+    </div>
+
+    <!-- Details Card (simplified status) -->
+    <div class="card">
+      <div class="collapsible-header">
+        <div class="card-title" style="margin-bottom:0;">Details</div>
+      </div>
+      <div class="collapsible-body">
+        <div class="kv-grid" style="margin-top:4px;">
+          <div>
+            <div class="kv-label">Phase</div>
+            <div class="kv-value"><span id="statusPhase" class="badge badge-gray">--</span></div>
+          </div>
+          <div>
+            <div class="kv-label">State</div>
+            <div class="kv-value" id="statusState">--</div>
+          </div>
+          <div id="statusReadinessItem">
+            <div class="kv-label">Cutover Readiness</div>
+            <div class="kv-value"><span id="statusReadiness" class="badge badge-gray">--</span></div>
+          </div>
+          <div>
+            <div class="kv-label">Started At</div>
+            <div class="kv-value" id="statusStarted">--</div>
+          </div>
+          <div id="switchedAtItem" style="display:none;">
+            <div class="kv-label">Switched At</div>
+            <div class="kv-value" id="statusSwitched">--</div>
+          </div>
+          <div id="completedAtItem" style="display:none;">
+            <div class="kv-label">Completed At</div>
+            <div class="kv-value" id="statusCompleted">--</div>
+          </div>
+        </div>
+        <div id="statusError" style="display:none; margin-top: 16px;">
+          <div class="kv-label">Error</div>
+          <div class="kv-value error-text" id="statusErrorText"></div>
+        </div>
+
+        <!-- Bucardo Details (nested inside Details) -->
+        <div style="margin-top: 20px;">
+          <div class="kv-label" style="margin-bottom: 12px;">Bucardo Replication</div>
+          <div id="bucardoLoading" class="text-muted">Waiting for data...</div>
+          <div id="bucardoDetails" style="display:none;">
+            <div class="kv-grid">
+              <div>
+                <div class="kv-label">Status</div>
+                <div class="kv-value" id="bucardoActive">--</div>
+              </div>
+              <div>
+                <div class="kv-label">Current State</div>
+                <div class="kv-value" id="bucardoState">--</div>
+              </div>
+              <div id="bucardoCopyItem">
+                <div class="kv-label">Initial Copy</div>
+                <div class="kv-value" id="bucardoCopy">--</div>
+              </div>
+              <div id="bucardoTablesItem">
+                <div class="kv-label">Tables in Sync</div>
+                <div class="kv-value" id="bucardoTables">--</div>
+              </div>
+              <div id="bucardoInsertedItem">
+                <div class="kv-label">Rows Inserted (Last Sync)</div>
+                <div class="kv-value" id="bucardoInserted">--</div>
+              </div>
+              <div id="bucardoDeletedItem">
+                <div class="kv-label">Rows Deleted (Last Sync)</div>
+                <div class="kv-value" id="bucardoDeleted">--</div>
+              </div>
+              <div id="bucardoCopiedBytesItem">
+                <div class="kv-label">Data Copied (Estimated)</div>
+                <div class="kv-value" id="bucardoCopiedBytes">--</div>
+              </div>
+              <div id="bucardoCopyPercentItem">
+                <div class="kv-label">Copy Progress</div>
+                <div class="kv-value" id="bucardoCopyPercent">--</div>
+              </div>
+              <div id="bucardoLastGoodItem" style="grid-column: 1 / -1;">
+                <div class="kv-label">Last Good Sync</div>
+                <div class="kv-value mono" id="bucardoLastGood">--</div>
+              </div>
+              <div id="bucardoDelayItem">
+                <div class="kv-label">Replication Delay</div>
+                <div class="kv-value" id="bucardoDelay">--</div>
+              </div>
+              <div id="bucardoBacklogTrendItem">
+                <div class="kv-label">Backlog Trend</div>
+                <div class="kv-value" id="bucardoBacklogTrend">--</div>
+              </div>
+              <div id="bucardoLagHealthItem">
+                <div class="kv-label">Lag Health</div>
+                <div class="kv-value" id="bucardoLagHealth">--</div>
+              </div>
+              <div id="bucardoLagBlockerItem">
+                <div class="kv-label">Lag Blocker</div>
+                <div class="kv-value mono" id="bucardoLagBlocker">--</div>
+              </div>
+            </div>
+            <div id="bucardoError" style="display:none; margin-top: 16px;">
+              <div class="kv-label">Last Error</div>
+              <div class="kv-value error-text" id="bucardoErrorText"></div>
+            </div>
+            <div class="card-actions">
+              <button class="btn btn-secondary btn-sm" onclick="exportDiagnostics()">Export Diagnostics JSON</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Migration Progress Card -->
+    <div class="card" id="migrationProgressCard">
+      <div class="card-title">Migration Progress</div>
+      <div id="copyEstimate" class="copy-estimate">
+        <div class="copy-estimate-title" id="copyEstimateTitle">Approximate copy progress</div>
+        <div class="progress-bar" style="margin:0;">
+          <div class="progress-fill" id="copyEstimateBar" style="width:0%"></div>
+        </div>
+        <div class="copy-estimate-note" id="copyEstimateNote"></div>
+        <div class="copy-estimate-note" id="copyEstimateDetail"></div>
+        <div class="copy-estimate-note" id="copyThroughputEta"></div>
+        <div id="stallWarning" class="stall-warning" style="display:none;"></div>
+        <div class="progress-checklist" id="eventChecklist" style="display:none;"></div>
+      </div>
+    </div>
+
+    <!-- Logs Card -->
+    <div class="card">
+      <div class="card-title" style="margin-bottom:0;">Live Logs</div>
+      <div class="logs-toolbar">
+        <div class="logs-meta">
+          <span class="logs-dot"></span>
+          <span id="logsAutoState">Auto refresh on</span>
+          <span class="logs-updated" id="logsLastUpdated">never</span>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-secondary btn-sm" id="logsAutoBtn" onclick="toggleLogsAutoRefresh()">Pause Auto Refresh</button>
+          <button class="btn btn-secondary btn-sm" onclick="refreshLogs(true)">Refresh Now</button>
+        </div>
+      </div>
+      <div id="logsBody">
+        <div class="log-grid">
+          <div class="log-panel">
+            <div class="log-label">Setup Log</div>
+            <div class="log-block" id="setupLog">No logs loaded.</div>
+          </div>
+          <div class="log-panel">
+            <div class="log-label">Bucardo Log</div>
+            <div class="log-block" id="bucardoLog">No logs loaded.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Help Footer -->
+    <div class="help-footer">
+      Need assistance with your migration? <a href="https://planetscale.com/contact" target="_blank">Talk to our team</a>
+    </div>
+
+  </div>
+
+  <!-- Confirmation Modal -->
+  <div class="modal-overlay" id="confirmModal">
+    <div class="modal">
+      <h3 id="modalTitle">Confirm</h3>
+      <p id="modalDesc">Are you sure?</p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn" id="modalConfirmBtn" onclick="modalConfirmAction()">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let lastStatusTime = Date.now();
+    let currentPhase = '';
+    let pendingAction = null;
+    let logsAutoRefreshEnabled = true;
+    let lastLogsTime = null;
+    let latestStatusData = null;
+    let latestLogsData = {};
+    const preflightChecks = {
+      extensionsReady: false,
+      storageReady: false
+    };
+
+    // ---- Phase helpers ----
+    function phaseBadgeClass(phase) {
+      switch(phase) {
+        case 'waiting': return 'badge-gray';
+        case 'starting': case 'configuring': return 'badge-blue';
+        case 'ready_to_copy': return 'badge-blue';
+        case 'copying': return 'badge-blue';
+        case 'replicating': return 'badge-green';
+        case 'switched': return 'badge-yellow';
+        case 'cleaning_up': return 'badge-orange';
+        case 'completed': return 'badge-green';
+        case 'error': return 'badge-red';
+        default: return 'badge-gray';
+      }
+    }
+
+    function phaseAccentClass(phase) {
+      switch(phase) {
+        case 'waiting': return 'accent-blue';
+        case 'starting': case 'configuring': return 'accent-blue';
+        case 'ready_to_copy': return 'accent-green';
+        case 'copying': return 'accent-blue';
+        case 'replicating': return 'accent-green';
+        case 'switched': return 'accent-yellow';
+        case 'cleaning_up': return 'accent-orange';
+        case 'completed': return 'accent-green';
+        case 'error': return 'accent-red';
+        default: return '';
+      }
+    }
+
+    function setBadge(el, text, phase) {
+      el.textContent = text || '--';
+      el.className = 'badge ' + phaseBadgeClass(phase || text);
+    }
+
+    function getNextActionState(data) {
+      const phase = data.phase;
+      const state = data.state;
+      const copyPhase = data.bucardo && data.bucardo.initial_copy_phase;
+      const readiness = data.cutover_readiness || {};
+
+      if (phase === 'waiting') {
+        return { tone: 'next-blue', main: 'Review checklist, then click Start Migration.', sub: 'Confirm extensions and storage sizing before beginning setup.' };
+      }
+      if (phase === 'starting' || phase === 'configuring') {
+        return { tone: 'next-blue', main: 'No action needed. Wait for setup to complete.', sub: 'The migrator is preparing schema and Bucardo replication in the background.' };
+      }
+      if (phase === 'ready_to_copy') {
+        return { tone: 'next-green', main: 'Click Start Data Copy when you are ready.', sub: 'Your app stays online while the initial copy runs.' };
+      }
+      if (phase === 'copying') {
+        if (state === 'paused') {
+          return { tone: 'next-yellow', main: 'Click Resume Sync to continue initial copy.', sub: 'Changes are queued while paused and will catch up after resume.' };
+        }
+        return { tone: 'next-blue', main: 'No action needed. Initial copy is in progress.', sub: 'Monitor logs and estimated progress; this can take minutes to hours.' };
+      }
+      if (phase === 'replicating') {
+        if (state === 'paused') {
+          return { tone: 'next-yellow', main: 'Click Resume Sync to restore live replication.', sub: 'Cutover should wait until replication is running again.' };
+        }
+        if (copyPhase === 'in-progress') {
+          return { tone: 'next-blue', main: 'No action needed. Final copy catch-up is still running.', sub: 'Wait until the dashboard confirms databases are in sync.' };
+        }
+        if (readiness.level === 'blocked') {
+          return { tone: 'next-red', main: 'Resolve replication health blockers before switching traffic.', sub: readiness.message || 'Cutover is currently blocked by safety checks.' };
+        }
+        if (readiness.level === 'warning') {
+          return { tone: 'next-yellow', main: 'Review warnings, then switch traffic when comfortable.', sub: 'You can proceed with override, but resolving warnings first is safer.' };
+        }
+        return { tone: 'next-green', main: 'Plan cutover and click Switch Traffic when ready.', sub: 'Have your app\'s PlanetScale DATABASE_URL prepared before switching.' };
+      }
+      if (phase === 'switched') {
+        return { tone: 'next-yellow', main: 'Update your app DATABASE_URL to PlanetScale now.', sub: 'Then test critical flows. Revert Switch is available if needed.' };
+      }
+      if (phase === 'cleaning_up') {
+        return { tone: 'next-orange', main: 'No action needed. Cleanup is running.', sub: 'Replication artifacts are being removed from Heroku source tables.' };
+      }
+      if (phase === 'completed') {
+        return { tone: 'next-green', main: 'Migration completed. Monitor app behavior on PlanetScale.', sub: 'When confident, remove temporary migration resources.' };
+      }
+      if (phase === 'error') {
+        return { tone: 'next-red', main: 'Review logs and error details before retrying.', sub: data.error || 'Fix the issue, then re-run the failed step.' };
+      }
+      return { tone: 'next-blue', main: 'Loading migration status...', sub: 'Checking current phase and recommended next step.' };
+    }
+
+    function updateNextActionBanner(data) {
+      const state = getNextActionState(data || {});
+      const card = document.getElementById('nextActionCard');
+      card.className = 'card compact-card next-action ' + state.tone;
+      document.getElementById('nextActionMain').textContent = state.main;
+      document.getElementById('nextActionSub').textContent = state.sub;
+    }
+
+    function setPreflightCheck(name, checked) {
+      if (!(name in preflightChecks)) return;
+      preflightChecks[name] = !!checked;
+      updatePreflightChecklistState();
+    }
+
+    function updatePreflightChecklistState() {
+      const startBtn = document.getElementById('startMigrationBtn');
+      if (!startBtn) return;
+      startBtn.disabled = !(preflightChecks.extensionsReady && preflightChecks.storageReady);
+    }
+
+    function readinessBadgeClass(level) {
+      switch (level) {
+        case 'ready': return 'badge-green';
+        case 'warning': return 'badge-yellow';
+        case 'blocked': return 'badge-red';
+        case 'not_ready': return 'badge-gray';
+        default: return 'badge-gray';
+      }
+    }
+
+    // ---- Status refresh ----
+    function refreshStatus() {
+      fetch('/status', { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(data => {
+          lastStatusTime = Date.now();
+          currentPhase = data.phase || '';
+          latestStatusData = data;
+          updateStatusUI(data);
+        })
+        .catch(err => console.error('Status fetch failed:', err));
+    }
+
+    function updateStatusUI(data) {
+      // Details card
+      setBadge(document.getElementById('statusPhase'), data.phase, data.phase);
+      document.getElementById('statusState').textContent = data.state || '--';
+      const readiness = data.cutover_readiness || {};
+      const readinessEl = document.getElementById('statusReadiness');
+      readinessEl.textContent = (readiness.level || '--').replace('_', ' ');
+      readinessEl.className = 'badge ' + readinessBadgeClass(readiness.level);
+      document.getElementById('statusStarted').textContent = formatTime(data.started_at);
+
+      const switchedEl = document.getElementById('switchedAtItem');
+      if (data.switched_at) {
+        switchedEl.style.display = '';
+        document.getElementById('statusSwitched').textContent = formatTime(data.switched_at);
+      } else { switchedEl.style.display = 'none'; }
+
+      const completedEl = document.getElementById('completedAtItem');
+      if (data.completed_at) {
+        completedEl.style.display = '';
+        document.getElementById('statusCompleted').textContent = formatTime(data.completed_at);
+      } else { completedEl.style.display = 'none'; }
+
+      const errorEl = document.getElementById('statusError');
+      if (data.error) {
+        errorEl.style.display = '';
+        document.getElementById('statusErrorText').textContent = data.error;
+      } else { errorEl.style.display = 'none'; }
+
+      updateBucardoUI(data.bucardo);
+      updatePhaseScopedVisibility(data);
+      updateNextActionBanner(data);
+      updateGuide(data);
+      updateCopyEstimate(data);
+    }
+
+    function setVisibleById(id, visible) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.style.display = visible ? '' : 'none';
+    }
+
+    function updatePhaseScopedVisibility(data) {
+      const phase = data.phase || '';
+      const copyPhase = data.bucardo && data.bucardo.initial_copy_phase;
+      const inInitialCopy = copyPhase === 'in-progress' || ['starting', 'configuring', 'ready_to_copy', 'copying'].includes(phase);
+      const inReplication = ['replicating', 'switched', 'cleaning_up', 'completed'].includes(phase) && copyPhase !== 'in-progress';
+      const showCutoverReadiness = ['replicating', 'switched'].includes(phase);
+      setVisibleById('statusReadinessItem', showCutoverReadiness);
+      setVisibleById('bucardoCopyItem', true);
+      setVisibleById('bucardoTablesItem', true);
+      setVisibleById('bucardoCopiedBytesItem', inInitialCopy || inReplication);
+      setVisibleById('bucardoCopyPercentItem', inInitialCopy || inReplication);
+
+      // Replication delta/lag metrics are only meaningful once initial copy is complete.
+      setVisibleById('bucardoInsertedItem', inReplication);
+      setVisibleById('bucardoDeletedItem', inReplication);
+      setVisibleById('bucardoLastGoodItem', inReplication);
+      setVisibleById('bucardoDelayItem', inReplication);
+      setVisibleById('bucardoBacklogTrendItem', inReplication);
+      setVisibleById('bucardoLagHealthItem', inReplication);
+      setVisibleById('bucardoLagBlockerItem', inReplication);
+
+    }
+
+    function updateCopyEstimate(data) {
+      const wrap = document.getElementById('copyEstimate');
+      const title = document.getElementById('copyEstimateTitle');
+      const bar = document.getElementById('copyEstimateBar');
+      const note = document.getElementById('copyEstimateNote');
+      const detail = document.getElementById('copyEstimateDetail');
+      const throughputEta = document.getElementById('copyThroughputEta');
+      const checklist = document.getElementById('eventChecklist');
+      const stallWarning = document.getElementById('stallWarning');
+
+      const phase = data.phase;
+      const copyPhase = data.bucardo && data.bucardo.initial_copy_phase;
+      const isActiveCopy = phase === 'copying' || (phase === 'replicating' && copyPhase === 'in-progress');
+      const signals = data.progress_signals || {};
+      const tablePhase = signals.table_phase || {};
+      const byteWeighted = signals.byte_weighted || {};
+      if (!isActiveCopy && phase !== 'replicating') {
+        wrap.style.display = 'none';
+        return;
+      }
+
+      wrap.style.display = '';
+      const pct = Number(byteWeighted.percent);
+      const safePct = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
+      title.textContent = 'Byte-weighted copy progress: ' + safePct.toFixed(1) + '%';
+      bar.style.width = safePct + '%';
+      let estimateSuffix = '.';
+      if (byteWeighted.estimate_mode === 'table_ratio_estimate') {
+        estimateSuffix = ' (estimated from completed table ratio).';
+      } else if (byteWeighted.estimate_mode === 'target_size_estimate') {
+        estimateSuffix = ' (estimated from live target table sizes during copy).';
+      } else if (byteWeighted.estimate_mode === 'target_size_estimate_monotonic') {
+        estimateSuffix = ' (estimated from live target table sizes; smoothed to avoid backward movement).';
+      }
+      note.textContent = 'Copied ' + formatBytes(byteWeighted.copied_bytes) + ' of ' + formatBytes(byteWeighted.total_bytes) + estimateSuffix;
+
+      const tableCompleted = Number(tablePhase.tables_completed);
+      const tableTotal = Number(tablePhase.total_tables);
+      const currentTable = tablePhase.current_table || '--';
+      detail.textContent = 'Table phase: ' + (tablePhase.phase || 'unknown') + ' • completed '
+        + (Number.isFinite(tableCompleted) ? tableCompleted : 0) + ' / ' + (Number.isFinite(tableTotal) ? tableTotal : 0)
+        + ' • current table: ' + currentTable;
+
+      const tp = signals.throughput_eta;
+      if (tp && Number.isFinite(Number(tp.mb_per_min))) {
+        throughputEta.textContent = 'Current speed: ' + Number(tp.mb_per_min).toFixed(2) + ' MB/min • ETA: ~'
+          + (tp.eta_min_minutes || 0) + '-' + (tp.eta_max_minutes || 0) + ' min remaining';
+      } else {
+        throughputEta.textContent = 'Current speed: calibrating...';
+      }
+
+      const stall = signals.stall_detection || {};
+      if (stall.stalled) {
+        stallWarning.style.display = '';
+        stallWarning.textContent = stall.message || 'No progress detected recently.';
+      } else {
+        stallWarning.style.display = 'none';
+        stallWarning.textContent = '';
+      }
+
+      const checklistData = signals.event_checklist && Array.isArray(signals.event_checklist.steps)
+        ? signals.event_checklist.steps
+        : [];
+      if (checklistData.length > 0) {
+        checklist.style.display = '';
+        checklist.innerHTML = checklistData.map((step) => (
+          '<div class="progress-check-item">'
+          + '<span>' + escapeHtml(step.label || step.id || 'step') + '</span>'
+          + '<span class="status">' + escapeHtml((step.status || 'pending').replace('_', ' ')) + '</span>'
+          + '</div>'
+        )).join('');
+      } else {
+        checklist.style.display = 'none';
+        checklist.innerHTML = '';
+      }
+    }
+
+    function summarizeActionOutput(output) {
+      const text = (output || '').trim();
+      if (!text) {
+        return { warningCount: 0, lineCount: 0, summary: '' };
+      }
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+      const warningCount = lines.filter(l => l.startsWith('WARNING:')).length;
+      return {
+        warningCount: warningCount,
+        lineCount: lines.length,
+        summary: warningCount > 0 ? ('Completed with ' + warningCount + ' warning(s).') : 'Completed successfully.'
+      };
+    }
+
+    function showActionResult(kind, title, message, rawOutput) {
+      const card = document.getElementById('actionResultCard');
+      const heading = document.getElementById('actionResultTitle');
+      const body = document.getElementById('actionResultBody');
+      const rawWrap = document.getElementById('actionResultRawWrap');
+      const raw = document.getElementById('actionResultRaw');
+
+      card.className = 'card action-result show ' + kind;
+      heading.textContent = title;
+      body.textContent = message;
+      if (rawOutput && rawOutput.trim()) {
+        raw.textContent = rawOutput.trim();
+        rawWrap.style.display = '';
+      } else {
+        raw.textContent = '';
+        rawWrap.style.display = 'none';
+      }
+    }
+
+    function dismissActionResult() {
+      const card = document.getElementById('actionResultCard');
+      card.className = 'card action-result';
+    }
+
+    function exportDiagnostics() {
+      const requests = [
+        fetch('/status', { credentials: 'same-origin' }).then(r => r.json()).catch(() => (latestStatusData || {})),
+        fetch('/logs?lines=400', { credentials: 'same-origin' }).then(r => r.json()).catch(() => (latestLogsData || {}))
+      ];
+
+      Promise.all(requests).then(([status, logs]) => {
+        const payload = {
+          exported_at: new Date().toISOString(),
+          dashboard_version: 'migration-ui',
+          status: status,
+          logs: logs
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'migration-diagnostics-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        showActionResult('success', 'Diagnostics export ready', 'Downloaded a diagnostics JSON snapshot for this migration run.');
+      }).catch((err) => {
+        console.error('Diagnostics export failed:', err);
+        showActionResult('error', 'Diagnostics export failed', 'Could not export diagnostics. Please try again.');
+      });
+    }
+
+    function updateBucardoUI(b) {
+      if (!b || b.error) {
+        document.getElementById('bucardoLoading').style.display = '';
+        document.getElementById('bucardoLoading').textContent = b && b.error ? 'Error: ' + b.error : 'Waiting for data...';
+        document.getElementById('bucardoDetails').style.display = 'none';
+        return;
+      }
+      document.getElementById('bucardoLoading').style.display = 'none';
+      document.getElementById('bucardoDetails').style.display = '';
+      document.getElementById('bucardoActive').textContent = b.active || '--';
+      document.getElementById('bucardoState').textContent = formatBucardoStateText(b);
+      document.getElementById('bucardoCopy').textContent = b.initial_copy_phase || '--';
+      document.getElementById('bucardoTables').textContent = b.tables_in_sync != null ? b.tables_in_sync : '--';
+      document.getElementById('bucardoInserted').textContent = formatSyncMetricValue(b.rows_inserted_last_sync, b.initial_copy_phase);
+      document.getElementById('bucardoDeleted').textContent = formatSyncMetricValue(b.rows_deleted_last_sync, b.initial_copy_phase);
+      document.getElementById('bucardoLastGood').textContent = formatLastGoodSyncValue(b.last_good_sync, b.initial_copy_phase);
+
+      const errEl = document.getElementById('bucardoError');
+      if (b.last_error) {
+        errEl.style.display = '';
+        document.getElementById('bucardoErrorText').textContent = b.last_error;
+      } else { errEl.style.display = 'none'; }
+
+      const signals = latestStatusData && latestStatusData.progress_signals ? latestStatusData.progress_signals : {};
+      const delay = signals.replication_delay || {};
+      const byteWeighted = signals.byte_weighted || {};
+      document.getElementById('bucardoCopiedBytes').textContent = formatCopiedBytesText(byteWeighted);
+      document.getElementById('bucardoCopyPercent').textContent = formatCopyPercentText(byteWeighted);
+      document.getElementById('bucardoDelay').textContent = formatLagDelayText(delay, b);
+      document.getElementById('bucardoBacklogTrend').textContent = delay.backlog_trend || '--';
+      document.getElementById('bucardoLagHealth').textContent = formatLagHealthText(delay, b);
+      document.getElementById('bucardoLagBlocker').textContent = formatLagBlockerText(delay.blocker_reason);
+    }
+
+    // ---- Guide ----
+    const PS_SPINNER_SVG = '<svg class="ps-spinner" width="22" height="22" viewBox="0 0 16 16" fill="none" stroke-linecap="round" stroke="currentColor" stroke-width="1px" xmlns="http://www.w3.org/2000/svg">'
+      + '<circle class="ps-spinner-line" cx="8" cy="8" r="7" stroke-dasharray="1 0.8" stroke-dashoffset="1" pathLength="1"/>'
+      + '<circle cx="8" cy="8" r="7" stroke-opacity="0.1" stroke-dasharray="0.8 1" pathLength="1"/>'
+      + '<circle cx="8" cy="8" r="7" stroke-opacity="0.3" stroke-dasharray="0.2 1" pathLength="1" transform="rotate(-72 8 8)"/>'
+      + '</svg>';
+
+    const SYNC_DOT_HTML = '<span class="sync-dot"></span>';
+
+    function setGuideIndicator(type) {
+      const el = document.getElementById('guideIndicator');
+      if (type === 'spinner') {
+        el.innerHTML = PS_SPINNER_SVG;
+      } else if (type === 'sync') {
+        el.innerHTML = SYNC_DOT_HTML;
+      } else {
+        el.innerHTML = '';
+      }
+    }
+
+    function blockerHelpText(code) {
+      switch (code) {
+        case 'bucardo_status_unavailable':
+          return 'Bucardo status is unavailable. Check the Bucardo log panel and wait for status to recover.';
+        case 'initial_copy_not_finished':
+          return 'Initial copy is still running. Wait until copy completes before cutover.';
+        case 'replication_not_healthy':
+          return 'Replication health checks are failing. Verify Bucardo state is Active/Good and recent syncs are succeeding.';
+        default:
+          return code;
+      }
+    }
+
+    function renderBlockerList(title, blockers) {
+      if (!Array.isArray(blockers) || blockers.length === 0) return '';
+      const items = blockers.map((code) => '<li>' + escapeHtml(blockerHelpText(code)) + '</li>').join('');
+      return '<div style="margin-top:8px;"><strong>' + title + ':</strong><ul style="margin:8px 0 0 18px;">' + items + '</ul></div>';
+    }
+
+    function updateGuide(data) {
+      const card = document.getElementById('guideCard');
+      const step = document.getElementById('guideStep');
+      const title = document.getElementById('guideTitle');
+      const body = document.getElementById('guideBody');
+      const phase = data.phase;
+      const copyPhase = data.bucardo && data.bucardo.initial_copy_phase;
+
+      // Set accent
+      card.className = 'card guide-card ' + phaseAccentClass(phase);
+
+      if (phase === 'waiting') {
+        step.textContent = 'Ready to start';
+        setGuideIndicator('none');
+        title.textContent = 'Start your migration';
+        body.innerHTML = '<p>This tool will migrate your Heroku Postgres database to PlanetScale. Here\'s what will happen:</p>'
+          + '<ol class="guide-checklist">'
+          + '<li><span class="step-num">1</span><span class="step-text">Your database structure (tables, indexes, constraints) will be copied to PlanetScale.</span></li>'
+          + '<li><span class="step-num">2</span><span class="step-text">All existing data will be copied, and real-time replication will begin. Your Heroku app continues running normally.</span></li>'
+          + '<li><span class="step-num">3</span><span class="step-text">When you\'re ready, you\'ll switch traffic by blocking writes to Heroku and pointing your app to PlanetScale.</span></li>'
+          + '</ol>'
+          + '<div class="guide-callout">'
+          + '<strong>Before you start, confirm both items:</strong>'
+          + '<div style="margin-top:10px;">'
+          + '<label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:8px;">'
+          + '<input type="checkbox" id="preflightExtensions" onchange="setPreflightCheck(\'extensionsReady\', this.checked)" ' + (preflightChecks.extensionsReady ? 'checked' : '') + '>'
+          + '<span>I have confirmed all PostgreSQL extensions used in my Heroku database are already set up in PlanetScale.</span>'
+          + '</label>'
+          + '<label style="display:flex; gap:8px; align-items:flex-start;">'
+          + '<input type="checkbox" id="preflightStorage" onchange="setPreflightCheck(\'storageReady\', this.checked)" ' + (preflightChecks.storageReady ? 'checked' : '') + '>'
+          + '<span>I have confirmed PlanetScale storage is at least 2x my Heroku database size, and I have considered scaling higher for faster copy (can be downsized later).</span>'
+          + '</label>'
+          + '</div>'
+          + '</div>'
+          + '<div class="guide-callout guide-callout-info">Your Heroku database will not be modified until you explicitly click "Switch Traffic" later in the process. It is safe to start.</div>'
+          + '<div class="guide-actions"><button class="btn btn-primary" id="startMigrationBtn" onclick="startMigration(this)">Start Migration</button></div>';
+        updatePreflightChecklistState();
+        return;
+
+      } else if (phase === 'starting' || phase === 'configuring') {
+        step.textContent = 'Step 1 of 6';
+        setGuideIndicator('spinner');
+        title.textContent = phase === 'starting' ? 'Setting up your migration environment' : 'Copying your database structure';
+        body.innerHTML = phase === 'starting'
+          ? '<p>We\'re starting up PostgreSQL and Bucardo, the tool that will keep your databases in sync during migration. This usually takes about 30 seconds.</p><p>Your Heroku app is running normally. No action is needed from you right now.</p>'
+          : '<p>We\'re copying your database structure (tables, columns, indexes, and constraints) from Heroku to PlanetScale and configuring real-time replication.</p><p>Your Heroku app is running normally. No action is needed \u2014 this step is fully automatic and typically takes a minute or two.</p>';
+
+      } else if (phase === 'ready_to_copy') {
+        step.textContent = 'Step 2 of 6';
+        setGuideIndicator('none');
+        title.textContent = 'Schema copied. Ready to start data copy.';
+        body.innerHTML = '<p>Your database structure (tables, indexes, constraints) has been copied to PlanetScale and Bucardo replication is configured.</p>'
+          + '<p>The next step will copy all existing rows from Heroku to PlanetScale. During this process:</p>'
+          + '<ol class="guide-checklist">'
+          + '<li><span class="step-num">1</span><span class="step-text">Your Heroku app continues running normally. No downtime.</span></li>'
+          + '<li><span class="step-num">2</span><span class="step-text">Every row in every table will be copied to PlanetScale.</span></li>'
+          + '<li><span class="step-num">3</span><span class="step-text">New changes to Heroku will be tracked and replicated automatically.</span></li>'
+          + '</ol>'
+          + '<div class="guide-callout guide-callout-info">The data copy will put read load on your Heroku database. For large databases, consider running this during off-peak hours. You can pause the copy at any time from the dashboard.</div>'
+          + '<div class="guide-actions"><button class="btn btn-primary" onclick="startCopy(this)">Start Data Copy</button></div>';
+        return;
+
+      } else if (phase === 'copying') {
+        step.textContent = 'Step 3 of 6';
+        const isPaused = data.state === 'paused';
+        if (isPaused) {
+          setGuideIndicator('none');
+          title.textContent = 'Data copy paused';
+          body.innerHTML = '<div class="guide-callout">The data copy is paused. Changes to your Heroku database are still being tracked but won\'t be copied to PlanetScale until you resume. No data will be lost.</div>'
+            + '<p>Pausing is useful if you notice performance impact on your Heroku app. When you\'re ready, click Resume to continue copying.</p>'
+            + '<div class="guide-actions"><button class="btn btn-primary btn-sm" onclick="resumeSync(this)">Resume Sync</button></div>';
+        } else {
+          setGuideIndicator('spinner');
+          title.textContent = 'Copying data to PlanetScale';
+          body.innerHTML = '<p>All existing rows are being copied from Heroku to PlanetScale. Any new changes to your Heroku database are being tracked and will be replicated automatically.</p>'
+            + '<p>Your Heroku app is running normally. For large databases this can take several hours.</p>'
+            + '<div class="guide-callout guide-callout-info">You can safely close this page and come back later. The copy will continue in the background.</div>'
+            + '<div class="guide-actions"><button class="btn btn-secondary btn-sm" onclick="pauseSync(this)">Pause Sync</button></div>';
+        }
+
+      } else if (phase === 'replicating') {
+        step.textContent = 'Step 4 of 6';
+        const isPaused = data.state === 'paused';
+        const readiness = data.cutover_readiness || {};
+        const pauseBtn = isPaused
+          ? '<button class="btn btn-primary btn-sm" onclick="resumeSync(this)">Resume Sync</button>'
+          : '<button class="btn btn-secondary btn-sm" onclick="pauseSync(this)">Pause Sync</button>';
+
+        if (isPaused) {
+          setGuideIndicator('none');
+          title.textContent = 'Replication paused';
+          body.innerHTML = '<div class="guide-callout">Replication is paused. Changes to your Heroku database are still being tracked but won\'t be copied to PlanetScale until you resume. No data will be lost.</div>'
+            + '<p>Pausing is useful if you notice performance impact on your Heroku app. When you\'re ready, click Resume to continue syncing.</p>'
+            + '<div class="guide-callout guide-callout-info">The longer replication is paused, the more changes will queue up. When you resume, Bucardo will catch up by replaying all queued changes.</div>'
+            + '<div class="guide-actions">' + pauseBtn + '</div>';
+        } else if (copyPhase === 'in-progress') {
+          setGuideIndicator('spinner');
+          title.textContent = 'Syncing your data';
+          body.innerHTML = '<p>We\'re copying all your existing data from Heroku to PlanetScale. Every row in every table is being transferred. Any new changes to your Heroku database are being tracked so nothing is missed.</p>'
+            + '<p>Your Heroku app is running normally during this process. Depending on the size of your database, this can take anywhere from a few minutes to several hours for very large databases.</p>'
+            + '<div class="guide-callout guide-callout-info">You can safely close this page and come back later. The migration will continue running in the background.</div>'
+            + '<div class="guide-actions">' + pauseBtn + '</div>';
+        } else {
+          setGuideIndicator('sync');
+          title.textContent = 'Your databases are in sync';
+          let readinessCallout = '';
+          let switchButton = '<button class="btn btn-primary" onclick="handleAction(\'switchTraffic\', this)">Switch Traffic</button> ';
+
+          if (readiness.level === 'blocked') {
+            switchButton = '<button class="btn btn-primary" disabled>Switch Traffic</button> ';
+            readinessCallout = '<div class="guide-callout">'
+              + '<strong>Cutover is blocked.</strong> '
+              + (readiness.message ? escapeHtml(readiness.message) : 'Resolve the health issues below before switching traffic.')
+              + renderBlockerList('Blocking checks', readiness.hard_blockers)
+              + '</div>';
+          } else if (readiness.level === 'warning') {
+            switchButton = '<button class="btn btn-primary" onclick="handleAction(\'switchTrafficOverride\', this)">Switch Traffic</button> ';
+            readinessCallout = '<div class="guide-callout">'
+              + '<strong>Cutover has warnings.</strong> '
+              + (readiness.message ? escapeHtml(readiness.message) : 'You can proceed, but this requires explicit override confirmation.')
+              + renderBlockerList('Warnings', readiness.soft_blockers)
+              + '</div>';
+          }
+
+          body.innerHTML = '<p>All your existing data has been copied, and your databases are now in sync. Every new write to your Heroku database is being replicated to PlanetScale in real-time.</p>'
+            + '<p>Your Heroku app is running normally. When you\'re ready to switch over to PlanetScale, follow these steps:</p>'
+            + '<ol class="guide-checklist">'
+            + '<li><span class="step-num">1</span><span class="step-text"><strong>Optional verification.</strong> Validate critical tables with sampled checks, key-range spot checks, and application smoke tests.</span></li>'
+            + '<li><span class="step-num">2</span><span class="step-text"><strong>Have your PlanetScale connection string ready.</strong> You\'ll need it to update your app\'s <code>DATABASE_URL</code> in the next step.</span></li>'
+            + '<li><span class="step-num">3</span><span class="step-text"><strong>Plan for a brief cutover window.</strong> When you click "Switch Traffic," writes to Heroku will be blocked. Your app will still be able to read data, but inserts, updates, and deletes will fail until you point your app to PlanetScale.</span></li>'
+            + '<li><span class="step-num">4</span><span class="step-text"><strong>Click "Switch Traffic"</strong> when you\'re ready to begin the cutover.</span></li>'
+            + '</ol>'
+            + readinessCallout
+            + '<div class="guide-actions">'
+            + switchButton
+            + pauseBtn
+            + '</div>';
+        }
+
+      } else if (phase === 'switched') {
+        step.textContent = 'Step 5 of 6';
+        setGuideIndicator('none');
+        title.textContent = 'Heroku writes are blocked \u2014 update your app now';
+        body.innerHTML = '<div class="guide-callout">Write access to your Heroku database has been revoked. Your app can still read from Heroku, but any inserts, updates, or deletes will fail. Act now to minimize downtime.</div>'
+          + '<p>Update your application to use PlanetScale:</p>'
+          + '<ol class="guide-checklist">'
+          + '<li><span class="step-num">1</span><span class="step-text"><strong>Update your app\'s <code>DATABASE_URL</code></strong> to your PlanetScale connection string. If your app is on Heroku, run:</span></li>'
+          + '</ol>'
+          + '<div class="guide-code">heroku config:set DATABASE_URL="your-planetscale-connection-string" -a your-app-name</div>'
+          + '<ol class="guide-checklist" start="2">'
+          + '<li><span class="step-num">2</span><span class="step-text"><strong>Verify your app is working.</strong> Your app will restart automatically. Test key functionality to confirm it\'s reading and writing to PlanetScale correctly.</span></li>'
+          + '<li><span class="step-num">3</span><span class="step-text"><strong>If something went wrong,</strong> click "Revert Switch" to restore write access to Heroku while you troubleshoot. This is safe and can be done at any time.</span></li>'
+          + '<li><span class="step-num">4</span><span class="step-text"><strong>Once everything looks good,</strong> click "Complete Migration" to clean up replication and finish the migration.</span></li>'
+          + '</ol>'
+          + '<div class="guide-actions">'
+          + '<button class="btn btn-secondary" onclick="handleAction(\'revertSwitch\', this)">Revert Switch</button>'
+          + '<button class="btn btn-danger" onclick="handleAction(\'cleanup\', this)">Complete Migration</button>'
+          + '</div>';
+
+      } else if (phase === 'cleaning_up') {
+        step.textContent = 'Step 6 of 6';
+        setGuideIndicator('spinner');
+        title.textContent = 'Cleaning up replication';
+        body.innerHTML = '<p>We\'re removing the replication triggers and tracking tables from your Heroku database. This is a housekeeping step and usually takes under a minute.</p><p>Your app should already be running on PlanetScale at this point. No action is needed.</p>';
+
+      } else if (phase === 'completed') {
+        step.textContent = 'Step 6 of 6';
+        setGuideIndicator('none');
+        title.textContent = 'Migration complete!';
+        body.innerHTML = '<p>Your data has been successfully migrated to PlanetScale. Here\'s what to do next:</p>'
+          + '<ol class="guide-checklist">'
+          + '<li><span class="step-num">1</span><span class="step-text"><strong>Confirm your app is running smoothly</strong> on PlanetScale. Monitor it for a while to make sure everything is working as expected.</span></li>'
+          + '<li><span class="step-num">2</span><span class="step-text"><strong>Delete this migration app.</strong> Run <code>heroku apps:destroy</code> or remove it from the Heroku dashboard. It\'s no longer needed.</span></li>'
+          + '<li><span class="step-num">3</span><span class="step-text"><strong>Remove the Heroku Postgres add-on</strong> from your main app when you\'re confident everything is working on PlanetScale.</span></li>'
+          + '</ol>';
+
+      } else if (phase === 'error') {
+        step.textContent = '';
+        setGuideIndicator('none');
+        title.textContent = 'Something went wrong';
+        body.innerHTML = '<p>An error occurred during the migration. Check the error details and logs below for more information.</p>'
+          + '<div class="guide-callout">Your Heroku database has not been modified. Your app is still running normally on Heroku.</div>'
+          + '<p>If you need help, <a href="https://planetscale.com/contact" target="_blank">contact the PlanetScale team</a>.</p>';
+
+      } else {
+        step.textContent = '';
+        setGuideIndicator('spinner');
+        title.textContent = 'Loading...';
+        body.innerHTML = '';
+      }
+    }
+
+    // ---- Actions ----
+    function handleAction(action, btn) {
+      if (action === 'switchTraffic') {
+        showModal(
+          'Switch Traffic',
+          'This will revoke write access on the Heroku database. Your application will no longer be able to write to Heroku. Any pending writes will be replicated to PlanetScale before you cut over. Are you sure you want to proceed?',
+          'btn-primary', 'Switch Traffic',
+          () => doAction('/switch-traffic', btn)
+        );
+      } else if (action === 'switchTrafficOverride') {
+        showModal(
+          'Switch Traffic (Override)',
+          'Cutover readiness has warnings. This override bypasses warning-level checks, but still enforces hard safety checks. Proceed only if you understand the risk.',
+          'btn-primary', 'Switch With Override',
+          () => doAction('/switch-traffic?force=1', btn)
+        );
+      } else if (action === 'revertSwitch') {
+        showModal(
+          'Revert Switch',
+          'This will restore write access on the Heroku database, allowing your app to write to Heroku again. Use this if you need to troubleshoot before completing the migration.',
+          'btn-secondary', 'Revert',
+          () => doAction('/revert-switch', btn)
+        );
+      } else if (action === 'cleanup') {
+        showModal(
+          'Complete Migration',
+          'This will permanently remove Bucardo replication triggers from your Heroku database. After this, changes to Heroku will no longer be replicated to PlanetScale. Make sure your app is running on PlanetScale before proceeding. This action cannot be undone.',
+          'btn-danger', 'Complete Migration',
+          () => doAction('/cleanup', btn)
+        );
+      }
+    }
+
+    function doAction(endpoint, btn) {
+      closeModal();
+      const origText = btn.textContent;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner spinner-dark"></span> Working...';
+      fetch(endpoint, { method: 'POST', credentials: 'same-origin' })
+        .then(async (r) => {
+          let data = {};
+          try { data = await r.json(); } catch (_) {}
+          if (!r.ok || data.success === false) {
+            const msg = (data && (data.error || data.message)) || 'Action failed';
+            showActionResult('error', 'Action failed', msg, data.output || '');
+          } else {
+            const summary = summarizeActionOutput(data.output || '');
+            const actionName = endpoint.replace(/^\//, '').split('?')[0].replace(/-/g, ' ');
+            if (summary.warningCount > 0) {
+              showActionResult('warning', 'Action completed with warnings', summary.summary, data.output || '');
+            } else {
+              const message = data.message || summary.summary || 'Action completed successfully.';
+              showActionResult('success', actionName.charAt(0).toUpperCase() + actionName.slice(1), message, data.output || '');
+            }
+          }
+          btn.textContent = origText;
+          btn.disabled = false;
+          refreshStatus();
+        })
+        .catch(err => {
+          btn.textContent = origText;
+          btn.disabled = false;
+          console.error('Action failed:', err);
+          showActionResult('error', 'Action failed', 'Network or server error while running action.');
+        });
+    }
+
+    // ---- Pause/Resume Sync ----
+    function pauseSync(btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Pausing...';
+      fetch('/pause-sync', { method: 'POST', credentials: 'same-origin' })
+        .then(r => r.json())
+        .then((data) => {
+          showActionResult('success', 'Replication paused', data.message || 'Replication is paused. Resume when ready.');
+          refreshStatus();
+        })
+        .catch(err => {
+          btn.disabled = false;
+          btn.textContent = 'Pause Sync';
+          console.error(err);
+          showActionResult('error', 'Pause failed', 'Could not pause replication.');
+        });
+    }
+
+    function resumeSync(btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner spinner-dark"></span> Resuming...';
+      fetch('/resume-sync', { method: 'POST', credentials: 'same-origin' })
+        .then(r => r.json())
+        .then((data) => {
+          showActionResult('success', 'Replication resumed', data.message || 'Replication resumed successfully.');
+          refreshStatus();
+        })
+        .catch(err => {
+          btn.disabled = false;
+          btn.textContent = 'Resume Sync';
+          console.error(err);
+          showActionResult('error', 'Resume failed', 'Could not resume replication.');
+        });
+    }
+
+    // ---- Start Copy ----
+    function startCopy(btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner spinner-dark"></span> Starting...';
+      fetch('/start-copy', { method: 'POST', credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(data => {
+          if (data.success) {
+            showActionResult('success', 'Data copy started', data.message || 'Initial copy request accepted.');
+            refreshStatus();
+          } else {
+            btn.disabled = false;
+            btn.textContent = 'Start Data Copy';
+            showActionResult('error', 'Data copy failed to start', data.message || 'Failed to start data copy');
+          }
+        })
+        .catch(err => {
+          btn.disabled = false;
+          btn.textContent = 'Start Data Copy';
+          console.error('Start copy failed:', err);
+          showActionResult('error', 'Data copy failed to start', 'Network or server error while starting data copy.');
+        });
+    }
+
+    // ---- Start Migration ----
+    function startMigration(btn) {
+      if (!(preflightChecks.extensionsReady && preflightChecks.storageReady)) {
+        showActionResult('warning', 'Checklist incomplete', 'Please confirm both pre-start checklist items before starting the migration.');
+        return;
+      }
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner spinner-dark"></span> Starting...';
+      fetch('/start-migration', { method: 'POST', credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(data => {
+          if (data.success) {
+            showActionResult('success', 'Migration started', data.message || 'Migration setup has started.');
+            refreshStatus();
+          } else {
+            btn.disabled = false;
+            btn.textContent = 'Start Migration';
+            showActionResult('error', 'Migration failed to start', data.message || 'Failed to start migration');
+          }
+        })
+        .catch(err => {
+          btn.disabled = false;
+          btn.textContent = 'Start Migration';
+          console.error('Start migration failed:', err);
+          showActionResult('error', 'Migration failed to start', 'Network or server error while starting migration.');
+        });
+    }
+
+    // ---- Modal ----
+    function showModal(title, desc, btnClass, btnLabel, onConfirm) {
+      document.getElementById('modalTitle').textContent = title;
+      document.getElementById('modalDesc').textContent = desc;
+      const confirmBtn = document.getElementById('modalConfirmBtn');
+      confirmBtn.className = 'btn ' + btnClass;
+      confirmBtn.textContent = btnLabel;
+      pendingAction = onConfirm;
+      document.getElementById('confirmModal').classList.add('open');
+    }
+    function closeModal() {
+      document.getElementById('confirmModal').classList.remove('open');
+      pendingAction = null;
+    }
+    function modalConfirmAction() { if (pendingAction) pendingAction(); }
+
+    // ---- Logs ----
+    function updateLogsUpdatedText() {
+      const el = document.getElementById('logsLastUpdated');
+      if (!lastLogsTime) {
+        el.textContent = 'never';
+        return;
+      }
+      const seconds = Math.max(0, Math.round((Date.now() - lastLogsTime) / 1000));
+      el.textContent = 'updated ' + seconds + 's ago';
+    }
+
+    function writeLogBlock(id, text) {
+      const el = document.getElementById(id);
+      const nearBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) < 40;
+      el.textContent = text;
+      if (nearBottom) el.scrollTop = el.scrollHeight;
+    }
+
+    function refreshLogs(force) {
+      if (!logsAutoRefreshEnabled && !force) return;
+      fetch('/logs?lines=400', { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(data => {
+          latestLogsData = data || {};
+          writeLogBlock('setupLog', data.setup || 'No setup log available.');
+          writeLogBlock('bucardoLog', data.bucardo || 'No Bucardo log available.');
+          lastLogsTime = Date.now();
+          updateLogsUpdatedText();
+        })
+        .catch(err => console.error('Failed to load logs:', err));
+    }
+
+    function toggleLogsAutoRefresh() {
+      logsAutoRefreshEnabled = !logsAutoRefreshEnabled;
+      document.getElementById('logsAutoState').textContent = logsAutoRefreshEnabled ? 'Auto refresh on' : 'Auto refresh paused';
+      document.getElementById('logsAutoBtn').textContent = logsAutoRefreshEnabled ? 'Pause Auto Refresh' : 'Resume Auto Refresh';
+      if (logsAutoRefreshEnabled) refreshLogs(true);
+    }
+
+    // ---- Helpers ----
+    function formatTime(iso) {
+      if (!iso) return '--';
+      try { return new Date(iso).toLocaleString(); } catch(e) { return iso; }
+    }
+    function formatDuration(seconds) {
+      const n = Number(seconds);
+      if (!Number.isFinite(n) || n < 0) return '--';
+      if (n < 60) return n + 's';
+      const mins = Math.floor(n / 60);
+      const sec = n % 60;
+      if (mins < 60) return mins + 'm ' + sec + 's';
+      const hours = Math.floor(mins / 60);
+      return hours + 'h ' + (mins % 60) + 'm';
+    }
+    function formatBytes(value) {
+      const num = Number(value);
+      if (!Number.isFinite(num) || num < 0) return 'unknown';
+      if (num < 1024) return num + ' B';
+      const kb = num / 1024;
+      if (kb < 1024) return kb.toFixed(1) + ' KB';
+      const mb = kb / 1024;
+      if (mb < 1024) return mb.toFixed(1) + ' MB';
+      return (mb / 1024).toFixed(2) + ' GB';
+    }
+    function formatLagBlockerText(reason) {
+      switch (reason) {
+        case 'initial_copy_not_finished':
+          return 'Initial copy is still running. Wait for it to finish before lag can be evaluated.';
+        case 'replication_not_healthy':
+          return 'Replication health checks are failing. Check Bucardo state and recent sync errors.';
+        case 'bucardo_status_unavailable':
+          return 'Bucardo status is unavailable. Check logs and wait for status recovery.';
+        case undefined:
+        case null:
+        case '':
+          return 'No active blocker.';
+        default:
+          return String(reason);
+      }
+    }
+    function isPostCopySettling(delay, b) {
+      const lagSeconds = Number(delay && delay.seconds_since_last_good);
+      const noBlocker = !(delay && delay.blocker_reason);
+      return b && b.initial_copy_phase === 'finished'
+        && b.current_state === 'good'
+        && noBlocker
+        && Number.isFinite(lagSeconds)
+        && lagSeconds >= 0
+        && lagSeconds < (2 * 60 * 60);
+    }
+    function formatLagHealthText(delay, b) {
+      const state = (delay && delay.health_state) || '';
+      const reason = delay && delay.blocker_reason;
+      if (state === 'healthy') return 'Healthy: replication is current and syncing normally.';
+      if (state === 'degraded' && isPostCopySettling(delay, b)) {
+        return 'Settling: initial copy just completed; waiting for the next steady sync checkpoint.';
+      }
+      if (state === 'degraded') return 'Degraded: replication is running but lag is elevated.';
+      if (state === 'blocked') {
+        if (reason === 'initial_copy_not_finished') {
+          return 'Blocked: initial copy in progress. This is expected before cutover readiness.';
+        }
+        return 'Blocked: replication is not cutover-ready. Resolve blocker shown below.';
+      }
+      return '--';
+    }
+    function formatLagDelayText(delay, b) {
+      const lagSeconds = delay && delay.seconds_since_last_good;
+      const reason = delay && delay.blocker_reason;
+      if (isPostCopySettling(delay, b)) {
+        return 'Recent copy completed; checkpoint pending (' + formatDuration(lagSeconds) + ')';
+      }
+      if (Number.isFinite(Number(lagSeconds))) return formatDuration(lagSeconds);
+      if (reason === 'initial_copy_not_finished') return 'Not available yet (initial copy running)';
+      return '--';
+    }
+    function formatBucardoStateText(b) {
+      const state = b && b.current_state;
+      if (state === 'applying_changes') {
+        return 'Applying row changes';
+      }
+      if (state === 'good') return 'Good';
+      if (state === 'bad') return 'Bad';
+      if (state === 'not-yet-started') return 'Not started';
+      if (state === 'unknown') return 'Active';
+      return state || '--';
+    }
+    function formatSyncMetricValue(value, copyPhase) {
+      if (value != null) return String(value);
+      if (copyPhase === 'in-progress') return 'Not available during initial copy';
+      return '--';
+    }
+    function formatLastGoodSyncValue(lastGoodSync, copyPhase) {
+      if (lastGoodSync) return lastGoodSync;
+      if (copyPhase === 'in-progress') return 'Not available during initial copy';
+      return '--';
+    }
+    function formatCopiedBytesText(byteWeighted) {
+      const copied = byteWeighted && Number(byteWeighted.copied_bytes);
+      const total = byteWeighted && Number(byteWeighted.total_bytes);
+      if (Number.isFinite(copied) && Number.isFinite(total) && total > 0) {
+        return formatBytes(copied) + ' of ' + formatBytes(total);
+      }
+      if (Number.isFinite(copied) && copied >= 0) return formatBytes(copied);
+      return '--';
+    }
+    function formatCopyPercentText(byteWeighted) {
+      const pct = byteWeighted && Number(byteWeighted.percent);
+      if (Number.isFinite(pct)) return pct.toFixed(1) + '%';
+      return '--';
+    }
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.appendChild(document.createTextNode(str));
+      return div.innerHTML;
+    }
+    function updateLastUpdated() {
+      const seconds = Math.round((Date.now() - lastStatusTime) / 1000);
+      document.getElementById('lastUpdated').textContent = seconds + 's ago';
+    }
+
+    // ---- Init ----
+    refreshStatus();
+    refreshLogs(true);
+    setInterval(refreshStatus, 5000);
+    setInterval(() => refreshLogs(false), 5000);
+    setInterval(updateLastUpdated, 1000);
+    setInterval(updateLogsUpdatedText, 1000);
+
+  </script>
+</body>
+</html>
