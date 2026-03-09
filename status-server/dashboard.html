@@ -469,70 +469,6 @@
       gap: 10px;
     }
 
-    /* Progress bar */
-    .progress-bar {
-      width: 100%;
-      height: 6px;
-      background: #2b2b2b;
-      border-radius: 3px;
-      margin: 12px 0;
-      overflow: hidden;
-    }
-    .progress-fill {
-      height: 100%;
-      background: #1e9de7;
-      border-radius: 3px;
-      transition: width 0.3s;
-    }
-
-    .copy-estimate {
-      margin-top: 10px;
-      padding: 10px 12px;
-      background: #151515;
-      border: 1px solid #2b2b2b;
-      border-radius: 6px;
-      display: none;
-    }
-    .copy-estimate-title {
-      font-size: 12px;
-      color: #a1a1a1;
-      margin-bottom: 6px;
-    }
-    .copy-estimate-note {
-      font-size: 11px;
-      color: #616161;
-      margin-top: 4px;
-    }
-    .progress-checklist {
-      margin-top: 10px;
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 6px;
-    }
-    .progress-check-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      font-size: 12px;
-      color: #d1d1d1;
-    }
-    .progress-check-item .status {
-      text-transform: uppercase;
-      letter-spacing: 0.4px;
-      font-size: 11px;
-      color: #a1a1a1;
-    }
-    .stall-warning {
-      margin-top: 10px;
-      padding: 8px 10px;
-      border-left: 3px solid #a78103;
-      background: rgba(167, 129, 3, 0.08);
-      border-radius: 0 6px 6px 0;
-      font-size: 12px;
-      color: #d1d1d1;
-    }
-
     /* Row update flash animation */
     @keyframes row-flash {
       0% { background: rgba(30, 157, 231, 0.15); }
@@ -726,22 +662,6 @@
             </div>
           </div>
         </div>
-      </div>
-    </div>
-
-    <!-- Migration Progress Card -->
-    <div class="card" id="migrationProgressCard">
-      <div class="card-title">Migration Progress</div>
-      <div id="copyEstimate" class="copy-estimate">
-        <div class="copy-estimate-title" id="copyEstimateTitle">Approximate copy progress</div>
-        <div class="progress-bar" style="margin:0;">
-          <div class="progress-fill" id="copyEstimateBar" style="width:0%"></div>
-        </div>
-        <div class="copy-estimate-note" id="copyEstimateNote"></div>
-        <div class="copy-estimate-note" id="copyEstimateDetail"></div>
-        <div class="copy-estimate-note" id="copyThroughputEta"></div>
-        <div id="stallWarning" class="stall-warning" style="display:none;"></div>
-        <div class="progress-checklist" id="eventChecklist" style="display:none;"></div>
       </div>
     </div>
 
@@ -967,7 +887,6 @@
       updatePhaseScopedVisibility(data);
       updateNextActionBanner(data);
       updateGuide(data);
-      updateCopyEstimate(data);
     }
 
     function setVisibleById(id, visible) {
@@ -997,83 +916,6 @@
       setVisibleById('bucardoLagHealthItem', inReplication);
       setVisibleById('bucardoLagBlockerItem', inReplication);
 
-    }
-
-    function updateCopyEstimate(data) {
-      const wrap = document.getElementById('copyEstimate');
-      const title = document.getElementById('copyEstimateTitle');
-      const bar = document.getElementById('copyEstimateBar');
-      const note = document.getElementById('copyEstimateNote');
-      const detail = document.getElementById('copyEstimateDetail');
-      const throughputEta = document.getElementById('copyThroughputEta');
-      const checklist = document.getElementById('eventChecklist');
-      const stallWarning = document.getElementById('stallWarning');
-
-      const phase = data.phase;
-      const copyPhase = data.bucardo && data.bucardo.initial_copy_phase;
-      const isActiveCopy = phase === 'copying' || (phase === 'replicating' && copyPhase === 'in-progress');
-      const signals = data.progress_signals || {};
-      const tablePhase = signals.table_phase || {};
-      const byteWeighted = signals.byte_weighted || {};
-      if (!isActiveCopy && phase !== 'replicating') {
-        wrap.style.display = 'none';
-        return;
-      }
-
-      wrap.style.display = '';
-      const pct = Number(byteWeighted.percent);
-      const safePct = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
-      title.textContent = 'Byte-weighted copy progress: ' + safePct.toFixed(1) + '%';
-      bar.style.width = safePct + '%';
-      let estimateSuffix = '.';
-      if (byteWeighted.estimate_mode === 'table_ratio_estimate') {
-        estimateSuffix = ' (estimated from completed table ratio).';
-      } else if (byteWeighted.estimate_mode === 'target_size_estimate') {
-        estimateSuffix = ' (estimated from live target table sizes during copy).';
-      } else if (byteWeighted.estimate_mode === 'target_size_estimate_monotonic') {
-        estimateSuffix = ' (estimated from live target table sizes; smoothed to avoid backward movement).';
-      }
-      note.textContent = 'Copied ' + formatBytes(byteWeighted.copied_bytes) + ' of ' + formatBytes(byteWeighted.total_bytes) + estimateSuffix;
-
-      const tableCompleted = Number(tablePhase.tables_completed);
-      const tableTotal = Number(tablePhase.total_tables);
-      const currentTable = tablePhase.current_table || '--';
-      detail.textContent = 'Table phase: ' + (tablePhase.phase || 'unknown') + ' • completed '
-        + (Number.isFinite(tableCompleted) ? tableCompleted : 0) + ' / ' + (Number.isFinite(tableTotal) ? tableTotal : 0)
-        + ' • current table: ' + currentTable;
-
-      const tp = signals.throughput_eta;
-      if (tp && Number.isFinite(Number(tp.mb_per_min))) {
-        throughputEta.textContent = 'Current speed: ' + Number(tp.mb_per_min).toFixed(2) + ' MB/min • ETA: ~'
-          + (tp.eta_min_minutes || 0) + '-' + (tp.eta_max_minutes || 0) + ' min remaining';
-      } else {
-        throughputEta.textContent = 'Current speed: calibrating...';
-      }
-
-      const stall = signals.stall_detection || {};
-      if (stall.stalled) {
-        stallWarning.style.display = '';
-        stallWarning.textContent = stall.message || 'No progress detected recently.';
-      } else {
-        stallWarning.style.display = 'none';
-        stallWarning.textContent = '';
-      }
-
-      const checklistData = signals.event_checklist && Array.isArray(signals.event_checklist.steps)
-        ? signals.event_checklist.steps
-        : [];
-      if (checklistData.length > 0) {
-        checklist.style.display = '';
-        checklist.innerHTML = checklistData.map((step) => (
-          '<div class="progress-check-item">'
-          + '<span>' + escapeHtml(step.label || step.id || 'step') + '</span>'
-          + '<span class="status">' + escapeHtml((step.status || 'pending').replace('_', ' ')) + '</span>'
-          + '</div>'
-        )).join('');
-      } else {
-        checklist.style.display = 'none';
-        checklist.innerHTML = '';
-      }
     }
 
     function summarizeActionOutput(output) {
