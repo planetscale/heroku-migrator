@@ -90,6 +90,12 @@ def branch_tag
   PS_BRANCH_ID ? " (branch: #{PS_BRANCH_ID})" : ""
 end
 
+def filter_harmless_pg_warnings(output)
+  output.lines.reject { |line|
+    line =~ /\AWARNING:\s+no privileges (?:could be revoked|were granted) for/
+  }.join
+end
+
 # Phase transition tracking for milestone notifications
 $last_notified_phase = nil
 $last_notified_copy_phase = nil
@@ -1155,7 +1161,7 @@ server.mount_proc "/switch-traffic" do |req, res|
     write_persistent_state("switched", started_at: started_at, switched_at: switched_at)
   end
 
-  res.body = JSON.generate({ success: success, output: output.strip })
+  res.body = JSON.generate({ success: success, output: filter_harmless_pg_warnings(output).strip })
 end
 
 # POST /revert-switch
@@ -1194,7 +1200,7 @@ server.mount_proc "/revert-switch" do |req, res|
     write_persistent_state("replicating", started_at: started_at)
   end
 
-  res.body = JSON.generate({ success: success, output: output.strip })
+  res.body = JSON.generate({ success: success, output: filter_harmless_pg_warnings(output).strip })
 end
 
 # POST /cleanup
