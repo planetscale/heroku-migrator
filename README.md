@@ -82,7 +82,27 @@ What this means for your Heroku database:
   - **Run the migration during off-peak hours.** Start the initial copy when your app has less traffic.
   - **Use the Pause button.** The migration dashboard has a Pause Sync button that stops replication without losing any data. If you notice performance issues on your Heroku app, pause the sync, wait for things to settle, then resume. All changes are tracked while paused and will catch up when you resume.
 
-### 7. Optional preflight SQL checks (recommended)
+### 7. Heroku's 24-hour restart limit
+
+Heroku restarts every dyno at least once every 24 hours. If a restart happens during the initial data copy, the copy starts over from the beginning.
+
+Copy speed varies by database, but most users can expect around **100 GB per hour**. Actual throughput depends on the number and size of indexes, average row width, network conditions between Heroku and PlanetScale, and the configuration of the target database. A 500 GB database might finish in 5 hours or might take 8+, depending on these factors.
+
+If your Heroku database is large enough that the initial copy could take close to or longer than 24 hours, **do not deploy this tool on Heroku**. Instead, run the container somewhere that won't force-restart it, such as an AWS EC2 instance, ECS task, or GCP VM. The container is standard Docker, so deploying elsewhere is just `docker run` with the same environment variables:
+
+```bash
+docker build -t heroku-migrator .
+docker run -d \
+  -e HEROKU_URL="postgres://..." \
+  -e PLANETSCALE_URL="postgresql://..." \
+  -e PASSWORD="your-password" \
+  -p 8080:8080 \
+  heroku-migrator
+```
+
+For databases under ~1 TB, Heroku is typically fine. For anything larger, use a host without forced restarts to avoid re-copying data.
+
+### 8. Optional preflight SQL checks (recommended)
 
 If you want extra confidence before cutover, run these checks on your source Heroku database:
 
@@ -258,6 +278,16 @@ This approach is useful for migrations because:
 - **Handles large databases.** The initial copy runs in the background and ongoing replication handles the delta.
 
 The trade-off is that triggers add a small amount of overhead to every write on your source database. For most workloads this is negligible, but for write-heavy databases under heavy load, you'll want to monitor performance and use the pause/resume controls in the dashboard.
+
+## Can I connect this to a Heroku follower/replica?
+
+No. The migrator must connect to your **primary** Heroku Postgres database.
+
+Bucardo works by installing triggers on the source database tables. These triggers fire on every INSERT, UPDATE, and DELETE to record changes for replication. Installing triggers requires write access to the database (Bucardo also creates a `bucardo` schema and tracking tables on the source).
+
+Heroku followers are read-only replicas. You cannot create triggers, schemas, or tables on them. If you point the migrator at a follower, the setup step will fail when it tries to install triggers.
+
+Use the connection URL for your primary database (`DATABASE_URL`), not a follower.
 
 ## Need help?
 
