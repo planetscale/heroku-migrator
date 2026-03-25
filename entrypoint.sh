@@ -204,23 +204,6 @@ EOF
     if bucardo status planetscale_import 2>/dev/null | awk -F " : " '/^Onetimecopy/ {print $2}' | grep -q "^No$"; then
       echo "Initial copy was already finished before restart; resuming without initial copy."
       should_skip_initial_copy=1
-    else
-      # If source/target total relation sizes are already very close, avoid
-      # re-running initial copy after restart even if Bucardo still says
-      # onetimecopy=Yes.
-      SOURCE_BYTES=$(psql "$HEROKU_URL" -A -t -c "SELECT COALESCE(SUM(pg_total_relation_size(c.oid)),0)::bigint FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname='public' AND c.relkind='r';" 2>/dev/null | tr -d '[:space:]')
-      TARGET_BYTES=$(psql "$PLANETSCALE_URL" -A -t -c "SELECT COALESCE(SUM(pg_total_relation_size(c.oid)),0)::bigint FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname='public' AND c.relkind='r';" 2>/dev/null | tr -d '[:space:]')
-      if [ -n "$SOURCE_BYTES" ] && [ -n "$TARGET_BYTES" ] && [ "$SOURCE_BYTES" -gt 0 ] 2>/dev/null; then
-        COPY_PCT=$(( TARGET_BYTES * 100 / SOURCE_BYTES ))
-        if [ "$COPY_PCT" -ge 95 ]; then
-          echo "Copy appears ${COPY_PCT}% complete by table size; resuming without initial copy."
-          should_skip_initial_copy=1
-        else
-          echo "Copy appears ${COPY_PCT}% complete; keeping initial copy enabled."
-        fi
-      else
-        echo "Could not estimate copy completion; keeping initial copy enabled."
-      fi
     fi
   fi
 
