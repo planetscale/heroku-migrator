@@ -188,7 +188,13 @@ For large databases, the initial copy can take hours. The dashboard shows progre
 
 ### Step 3: Switch traffic
 
-When the dashboard shows your databases are in sync, you're ready to cut over. Click **Switch Traffic** to revoke write access on your Heroku database. Your app can still read data, but writes will fail.
+When the dashboard shows your databases are in sync, you're ready to cut over. Click **Switch Traffic** to block writes on your Heroku database. This runs a SQL `REVOKE` command that removes `INSERT`, `UPDATE`, and `DELETE` privileges from your Heroku database user:
+
+```sql
+REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public FROM your_heroku_user;
+```
+
+After this, your app can still **read** from Heroku, but any **write** query will fail with a permission error. This ensures no new data is written to Heroku while you switch over.
 
 Then update your app to use PlanetScale:
 
@@ -196,7 +202,9 @@ Then update your app to use PlanetScale:
 heroku config:set DATABASE_URL="your-planetscale-connection-string" -a your-app-name
 ```
 
-Your app restarts and begins using PlanetScale. Test it to make sure everything works. If something goes wrong, click **Revert Switch** in the dashboard to restore write access to Heroku.
+Your app restarts and begins using PlanetScale. Test it to make sure everything works.
+
+If something goes wrong, click **Revert Switch** in the dashboard. This runs the inverse `GRANT` command to restore write access to your Heroku database, so your app can write to Heroku again immediately.
 
 During **Switch Traffic** or **Revert Switch**, you may see PostgreSQL warnings about `pg_stat_statements` privileges in the dashboard/API output. These warnings are expected on some Heroku Postgres setups and do not mean the switch or revert failed.
 
