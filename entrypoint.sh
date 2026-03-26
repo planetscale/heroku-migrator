@@ -215,13 +215,14 @@ EOF
     echo "Replication resumed!"
     bucardo kick planetscale_import 0
 
-    RESUMED_PHASE="copying"
-    RESUMED_STATE="initial_copy"
-    RESUMED_MESSAGE="Copy resumed after restart."
-    if bucardo status planetscale_import 2>/dev/null | awk -F " : " '/^Onetimecopy/ {print $2}' | grep -q "^No$"; then
+    if [ "$should_skip_initial_copy" -eq 1 ]; then
       RESUMED_PHASE="replicating"
       RESUMED_STATE="running"
       RESUMED_MESSAGE="Bucardo replication resumed after restart."
+    else
+      RESUMED_PHASE="copying"
+      RESUMED_STATE="initial_copy"
+      RESUMED_MESSAGE="Copy resumed after restart."
     fi
 
     cat > /opt/bucardo/state/status.json <<EOF
