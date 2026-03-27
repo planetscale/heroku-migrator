@@ -1009,7 +1009,7 @@ server.mount_proc "/pause-sync" do |req, res|
     File.write(STATUS_FILE, JSON.generate({
       phase: "replicating",
       state: "paused",
-      message: "Replication is paused. Changes are still being tracked on Heroku.",
+      message: "Replication is paused. Triggers are still active on Heroku -- every write still has trigger overhead. To fully remove triggers, use Abort Migration.",
       error: nil,
       started_at: started_at,
     }))
@@ -1250,6 +1250,63 @@ server.mount_proc "/cleanup" do |req, res|
   end
 
   res.body = JSON.generate({ success: true, message: "Cleanup started. Check /status for progress." })
+end
+
+# POST /abort - emergency stop: removes all Bucardo triggers and replication from any active phase
+server.mount_proc "/abort" do |req, res|
+  require_auth(req, res)
+
+  unless req.request_method == "POST"
+    res.status = 405
+    res.content_type = "application/json"
+    res.body = JSON.generate({ error: "Method not allowed" })
+    next
+  end
+
+  res.content_type = "application/json"
+
+  current = read_status_file
+  allowed_phases = %w[configuring ready_to_copy copying replicating error]
+  unless allowed_phases.include?(current["phase"])
+    res.status = 409
+    res.body = JSON.generate({ success: false, error: "Abort is not available in the current phase (#{current["phase"]})." })
+    next
+  end
+
+  started_at = current["started_at"]
+
+  File.write(STATUS_FILE, JSON.generate({
+    phase: "cleaning_up",
+    state: "aborting",
+    message: "Aborting migration and removing Bucardo triggers...",
+    error: nil,
+    started_at: started_at,
+  }))
+  write_persistent_state("cleaning_up", started_at: started_at)
+  notify_slack(":stop_sign: Migration aborted#{branch_tag}")
+
+  Thread.new do
+    output = `sh #{SCRIPTS_DIR}/rm-bucardo-repl.sh --primary "#{HEROKU_URL}" --replica "#{PLANETSCALE_URL}" 2>&1`
+    success = $?.success?
+    completed_at = Time.now.utc.iso8601
+
+    File.write(STATUS_FILE, JSON.generate({
+      phase: success ? "completed" : "error",
+      state: success ? "aborted" : "abort_failed",
+      message: success ? "Migration aborted. All Bucardo triggers have been removed from your Heroku database. We recommend running ANALYZE on your Heroku database to refresh query plan statistics." : "Abort cleanup failed.",
+      error: success ? nil : output,
+      started_at: started_at,
+      completed_at: completed_at,
+    }))
+    write_persistent_state(
+      success ? "completed" : "error",
+      started_at: started_at,
+      completed_at: completed_at,
+      error: success ? nil : output&.slice(0, 500)
+    )
+  end
+
+  res.body = JSON.generate({ success: true, message: "Abort started. Removing triggers and replication. Check /status for progress." })
 end
 
 # ---------------------------------------------------------------------------

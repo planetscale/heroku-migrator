@@ -1127,15 +1127,16 @@
           setGuideIndicator('none');
           title.textContent = 'Data copy paused';
           body.innerHTML = '<div class="guide-callout">The data copy is paused. Changes to your Heroku database are still being tracked but won\'t be copied to PlanetScale until you resume. No data will be lost.</div>'
-            + '<p>Pausing is useful if you notice performance impact on your Heroku app. When you\'re ready, click Resume to continue copying.</p>'
-            + '<div class="guide-actions"><button class="btn btn-primary btn-sm" onclick="resumeSync(this)">Resume Sync</button></div>';
+            + '<div class="guide-callout guide-callout-info"><strong>Note:</strong> Bucardo\'s triggers are still active on your Heroku database. Every write still has trigger overhead. Pausing stops data transfer to PlanetScale but does not reduce the write-side impact on Heroku.</div>'
+            + '<p>When you\'re ready, click Resume to continue copying. If you need to fully remove trigger overhead, click Abort Migration.</p>'
+            + '<div class="guide-actions"><button class="btn btn-primary btn-sm" onclick="resumeSync(this)">Resume Sync</button> <button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button></div>';
         } else {
           setGuideIndicator('spinner');
           title.textContent = 'Copying data to PlanetScale';
           body.innerHTML = '<p>All existing rows are being copied from Heroku to PlanetScale. Any new changes to your Heroku database are being tracked and will be replicated automatically.</p>'
             + '<p>Your Heroku app is running normally. For large databases this can take several hours.</p>'
             + '<div class="guide-callout guide-callout-info">You can safely close this page and come back later. The copy will continue in the background.</div>'
-            + '<div class="guide-actions"><button class="btn btn-secondary btn-sm" onclick="pauseSync(this)">Pause Sync</button></div>';
+            + '<div class="guide-actions"><button class="btn btn-secondary btn-sm" onclick="pauseSync(this)">Pause Sync</button> <button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button></div>';
         }
 
       } else if (phase === 'replicating') {
@@ -1150,16 +1151,16 @@
           setGuideIndicator('none');
           title.textContent = 'Replication paused';
           body.innerHTML = '<div class="guide-callout">Replication is paused. Changes to your Heroku database are still being tracked but won\'t be copied to PlanetScale until you resume. No data will be lost.</div>'
-            + '<p>Pausing is useful if you notice performance impact on your Heroku app. When you\'re ready, click Resume to continue syncing.</p>'
-            + '<div class="guide-callout guide-callout-info">The longer replication is paused, the more changes will queue up. When you resume, Bucardo will catch up by replaying all queued changes.</div>'
-            + '<div class="guide-actions">' + pauseBtn + '</div>';
+            + '<div class="guide-callout guide-callout-info"><strong>Note:</strong> Bucardo\'s triggers are still active on your Heroku database. Every write still has trigger overhead. Pausing stops data transfer to PlanetScale but does not reduce the write-side impact on Heroku. The longer replication is paused, the more changes will queue up.</div>'
+            + '<p>When you\'re ready, click Resume to continue syncing. If you need to fully remove trigger overhead, click Abort Migration.</p>'
+            + '<div class="guide-actions">' + pauseBtn + ' <button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button></div>';
         } else if (copyPhase === 'in-progress') {
           setGuideIndicator('spinner');
           title.textContent = 'Syncing your data';
           body.innerHTML = '<p>We\'re copying all your existing data from Heroku to PlanetScale. Every row in every table is being transferred. Any new changes to your Heroku database are being tracked so nothing is missed.</p>'
             + '<p>Your Heroku app is running normally during this process. Depending on the size of your database, this can take anywhere from a few minutes to several hours for very large databases.</p>'
             + '<div class="guide-callout guide-callout-info">You can safely close this page and come back later. The migration will continue running in the background.</div>'
-            + '<div class="guide-actions">' + pauseBtn + '</div>';
+            + '<div class="guide-actions">' + pauseBtn + ' <button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button></div>';
         } else {
           setGuideIndicator('sync');
           title.textContent = 'Your databases are in sync';
@@ -1194,6 +1195,7 @@
             + '<div class="guide-actions">'
             + switchButton
             + pauseBtn
+            + ' <button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button>'
             + '</div>';
         }
 
@@ -1240,7 +1242,8 @@
         title.textContent = 'Something went wrong';
         body.innerHTML = '<p>An error occurred during the migration. Check the error details and logs below for more information.</p>'
           + '<div class="guide-callout">Your Heroku database has not been modified. Your app is still running normally on Heroku.</div>'
-          + '<p>If you need help, <a href="https://planetscale.com/contact" target="_blank">contact the PlanetScale team</a>.</p>';
+          + '<p>If you need help, <a href="https://planetscale.com/contact" target="_blank">contact the PlanetScale team</a>.</p>'
+          + '<div class="guide-actions"><button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button></div>';
 
       } else {
         step.textContent = '';
@@ -1279,6 +1282,13 @@
           'This will permanently remove Bucardo replication triggers from your Heroku database. After this, changes to Heroku will no longer be replicated to PlanetScale. Make sure your app is running on PlanetScale before proceeding. This action cannot be undone.',
           'btn-danger', 'Complete Migration',
           () => doAction('/cleanup', btn)
+        );
+      } else if (action === 'abort') {
+        showModal(
+          'Abort Migration',
+          'This will permanently stop the migration and remove all Bucardo triggers from your Heroku database. Replication will stop and any data already copied to PlanetScale will remain, but no further changes will be synced. You would need to start the migration from scratch to try again. After aborting, we recommend running ANALYZE on your Heroku database to refresh query plan statistics. This action cannot be undone.',
+          'btn-danger', 'Abort Migration',
+          () => doAction('/abort', btn)
         );
       }
     }

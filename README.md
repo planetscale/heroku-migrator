@@ -80,7 +80,7 @@ What this means for your Heroku database:
 - **Large databases** (tens of millions to billions of rows): The initial data copy puts additional read load on your Heroku database. The triggers add a small amount of write overhead. For most workloads this is fine, but if your database is already under heavy load, consider:
   - **Upgrade your Heroku Postgres plan temporarily.** A larger plan gives your database more headroom during the migration. You can downgrade or remove it once you're done.
   - **Run the migration during off-peak hours.** Start the initial copy when your app has less traffic.
-  - **Use the Pause button.** The migration dashboard has a Pause Sync button that stops replication without losing any data. If you notice performance issues on your Heroku app, pause the sync, wait for things to settle, then resume. All changes are tracked while paused and will catch up when you resume.
+  - **Use the Pause button (with caveats).** The migration dashboard has a Pause Sync button that stops data transfer to PlanetScale. However, pausing does **not** remove Bucardo's triggers from your Heroku database. Every write still fires the trigger and records changes into tracking tables, so the per-write overhead remains. Pausing reduces the migrator's read load on Heroku but does not eliminate the write-side cost. If you need to fully remove the trigger overhead, use the **Abort Migration** button in the dashboard.
 
 ### 7. Heroku's 24-hour restart limit
 
@@ -156,18 +156,25 @@ You'll be prompted for a password. Enter the `PASSWORD` you set above. The usern
 
 ### Which dyno size should I use?
 
-The migrator runs PostgreSQL and Bucardo inside the dyno, so it needs more memory than a typical web app.
+The migrator runs PostgreSQL and Bucardo inside the dyno, so it needs more memory than a typical web app. Memory usage scales with **write volume**, not just data size -- high-write databases produce more delta tracking data for Bucardo to process.
 
-- **Standard-1x (512 MB)**: Fine for small databases (under 1 million rows, fewer than 20 tables).
-- **Standard-2x (1 GB)**: Recommended for most migrations. Handles databases with tens of millions of rows comfortably.
-- **Performance-M (2.5 GB)**: For very large databases with wide rows, many tables, or if you see R14 memory errors on Standard-2x.
+- **Standard-1x (512 MB)**: Small databases with low write volume (under 1 million rows, fewer than 20 tables).
+- **Standard-2x (1 GB)**: Most migrations with moderate write volume.
+- **Performance-M (2.5 GB)**: Large databases, high write throughput, many tables, or if you see R14 memory errors on Standard-2x.
+- **Performance-L (14 GB)**: Very large databases (100+ GB) with high-write, high-contention tables. If your Heroku database is already under heavy load, start here.
 
-This is a temporary app. You'll delete it after the migration is complete, so the cost is minimal. When in doubt, start with Standard-2x.
+This is a temporary app. You'll delete it after the migration is complete, so the cost is minimal. When in doubt, start with Performance-M.
 
-To change the dyno size:
+**Watch for R14 memory errors.** If the migrator dyno runs out of memory, Bucardo can't keep up with replication, causing delays to grow and potentially cascading into performance issues on your Heroku database. Monitor with:
 
 ```bash
-heroku ps:resize web=standard-2x -a my-migration
+heroku logs --tail -a my-migration | grep R14
+```
+
+If you see R14 errors, resize immediately:
+
+```bash
+heroku ps:resize web=performance-l -a my-migration
 ```
 
 ## How the migration works
@@ -184,7 +191,7 @@ All existing rows are copied from Heroku to PlanetScale (the "initial copy"). On
 
 Your Heroku app continues running normally throughout this entire process. You don't need to do anything until you're ready to switch.
 
-For large databases, the initial copy can take hours. The dashboard shows progress and you can safely close the browser and come back later. If you need to reduce load on your Heroku database, use the **Pause Sync** button. Changes are still tracked while paused and will catch up when you resume.
+For large databases, the initial copy can take hours. The dashboard shows progress and you can safely close the browser and come back later. If you need to reduce load on your Heroku database, use the **Pause Sync** button. This stops data transfer to PlanetScale, but Bucardo's triggers remain active on Heroku -- every write still has trigger overhead. Changes are tracked while paused and will catch up when you resume. If your database is severely impacted and you need to fully remove the triggers, use the **Abort Migration** button instead.
 
 ### Step 3: Switch traffic
 
@@ -285,7 +292,7 @@ This approach is useful for migrations because:
 - **Works with any PostgreSQL host.** Bucardo doesn't need special configuration on the source or target. It just needs standard PostgreSQL connections.
 - **Handles large databases.** The initial copy runs in the background and ongoing replication handles the delta.
 
-The trade-off is that triggers add a small amount of overhead to every write on your source database. For most workloads this is negligible, but for write-heavy databases under heavy load, you'll want to monitor performance and use the pause/resume controls in the dashboard.
+The trade-off is that triggers add a small amount of overhead to every write on your source database. For most workloads this is negligible, but for write-heavy databases under heavy load, you'll want to monitor performance. Note that pausing replication stops data transfer but does **not** remove the triggers -- every write still has trigger overhead while paused. If you need to fully stop the impact on your source database, use the **Abort Migration** button in the dashboard to remove all triggers.
 
 ## Can I connect this to a Heroku follower/replica?
 
