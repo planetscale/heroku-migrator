@@ -109,10 +109,14 @@ If you want extra confidence before cutover, run these checks on your source Her
 ```bash
 # 1) Verify non-default extensions in use
 heroku pg:psql -a your-app-name -c "SELECT extname, extversion FROM pg_extension WHERE extname != 'plpgsql' ORDER BY extname;"
+```
 
+```bash
 # 2) Verify the migrator role can read/write tables (for realistic validation runs)
 heroku pg:psql -a your-app-name -c "SELECT table_name, has_table_privilege(current_user, format('public.%I', table_name), 'SELECT,INSERT,UPDATE,DELETE') FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;"
+```
 
+```bash
 # 3) Optional table sanity snapshot
 heroku pg:psql -a your-app-name -c "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename;"
 ```
