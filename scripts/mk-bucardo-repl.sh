@@ -72,6 +72,11 @@ else
   bucardo add sync "planetscale_import" dbs="heroku,planetscale" onetimecopy=0 relgroup="planetscale_import"
 fi
 
+# Give Bucardo enough time to validate all tables across both databases.
+# The default 30s timeout is too short for databases with many tables, since
+# each table is inspected on both source and target over remote connections.
+bucardo set reload_config_timeout=180
+
 # Reload Bucardo, which starts the sync we just added.
 bucardo reload
 
