@@ -864,6 +864,23 @@
       startBtn.disabled = !(preflightChecks.extensionsReady && preflightChecks.storageReady && preflightChecks.tablesReady);
     }
 
+    function renderCachedPreflightResult() {
+      const container = document.getElementById('preflightTableCheck');
+      if (!container) return;
+      if (preflightBadTables.length === 0) {
+        container.innerHTML = '<div class="guide-callout guide-callout-success">All tables have a primary key or unique index.</div>';
+      } else {
+        let tableItems = preflightBadTables.map(t => '<li>' + escapeHtml(t) + '</li>').join('');
+        container.innerHTML = '<div class="guide-callout guide-callout-error">'
+          + '<strong>' + preflightBadTables.length + ' table(s) missing a primary key or unique index</strong>'
+          + '<p style="margin:8px 0 4px;">Bucardo requires every table to have a primary key or unique index to track rows during replication. Add one to each table listed below in your Heroku database before starting.</p>'
+          + '<ul class="preflight-table-list">' + tableItems + '</ul>'
+          + '<p style="margin:8px 0 0; font-size:12px; color:#a1a1a1;">Example fix: <code>ALTER TABLE table_name ADD PRIMARY KEY (id);</code></p>'
+          + '</div>'
+          + '<button class="btn btn-secondary btn-sm" style="margin-top:8px;" onclick="runPreflightChecks()">Re-check Tables</button>';
+      }
+    }
+
     function runPreflightChecks() {
       const container = document.getElementById('preflightTableCheck');
       if (!container) return;
@@ -1164,7 +1181,11 @@
           + '<div class="guide-callout guide-callout-info">Your Heroku database will not be modified until you explicitly click "Switch Traffic" later in the process. It is safe to start.</div>'
           + '<div class="guide-actions"><button class="btn btn-primary" id="startMigrationBtn" onclick="startMigration(this)">Start Migration</button></div>';
         updatePreflightChecklistState();
-        if (!preflightCheckRan) runPreflightChecks();
+        if (!preflightCheckRan) {
+          runPreflightChecks();
+        } else {
+          renderCachedPreflightResult();
+        }
         return;
 
       } else if (phase === 'starting' || phase === 'configuring') {
