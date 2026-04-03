@@ -869,7 +869,7 @@
       if (!container) return;
       const passedSection = document.getElementById('preflightPassedSection');
       if (preflightBadTables.length === 0) {
-        container.innerHTML = '<div class="guide-callout guide-callout-success">All tables have a primary key or unique index.</div>';
+        container.innerHTML = '';
         if (passedSection) passedSection.style.display = '';
       } else {
         let tableItems = preflightBadTables.map(t => '<li>' + escapeHtml(t) + '</li>').join('');
