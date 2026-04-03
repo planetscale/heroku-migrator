@@ -846,6 +846,9 @@
     function updateNextActionBanner(data) {
       const state = getNextActionState(data || {});
       const card = document.getElementById('nextActionCard');
+      const phase = (data && data.phase) || '';
+      const isTerminal = ['completed', 'aborted', 'error'].includes(phase);
+      card.style.display = isTerminal ? 'none' : '';
       card.className = 'card compact-card next-action ' + state.tone;
       document.getElementById('nextActionMain').textContent = state.main;
       document.getElementById('nextActionSub').textContent = state.sub;
@@ -911,7 +914,11 @@
         .then(r => r.json())
         .then(data => {
           lastStatusTime = Date.now();
-          currentPhase = data.phase || '';
+          const newPhase = data.phase || '';
+          if (currentPhase && newPhase !== currentPhase) {
+            dismissActionResult();
+          }
+          currentPhase = newPhase;
           latestStatusData = data;
           updateStatusUI(data);
         })
@@ -1306,7 +1313,7 @@
         setGuideIndicator('none');
         title.textContent = 'Migration aborted';
         body.innerHTML = '<p>The migration was aborted and all Bucardo replication triggers have been removed from your Heroku database. No data was migrated to PlanetScale.</p>'
-          + '<div class="guide-callout">Your Heroku database is unchanged and your app is still running normally on Heroku.</div>'
+          + '<p>Your Heroku database is unchanged and your app is still running normally on Heroku.</p>'
           + '<p>We recommend running <code>ANALYZE</code> on your Heroku database to refresh query plan statistics after trigger removal.</p>'
           + '<p>You can safely delete this migration app when ready.</p>';
 
