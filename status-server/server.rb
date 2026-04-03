@@ -1366,7 +1366,7 @@ server.mount_proc "/abort" do |req, res|
     completed_at = Time.now.utc.iso8601
 
     File.write(STATUS_FILE, JSON.generate({
-      phase: success ? "completed" : "error",
+      phase: success ? "aborted" : "error",
       state: success ? "aborted" : "abort_failed",
       message: success ? "Migration aborted. All Bucardo triggers have been removed from your Heroku database. We recommend running ANALYZE on your Heroku database to refresh query plan statistics." : "Abort cleanup failed.",
       error: success ? nil : output,
@@ -1374,7 +1374,7 @@ server.mount_proc "/abort" do |req, res|
       completed_at: completed_at,
     }))
     write_persistent_state(
-      success ? "completed" : "error",
+      success ? "aborted" : "error",
       started_at: started_at,
       completed_at: completed_at,
       error: success ? nil : output&.slice(0, 500)

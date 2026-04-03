@@ -105,6 +105,12 @@ EOF
 {"phase":"completed","state":"cleanup_complete","message":"Migration complete. Bucardo replication removed.","error":null,"started_at":"${PERSISTED_STARTED}","completed_at":"${PERSISTED_COMPLETED}"}
 EOF
     ;;
+  "aborted")
+    echo "Migration was aborted. Starting dashboard only."
+    cat > /opt/bucardo/state/status.json <<EOF
+{"phase":"aborted","state":"aborted","message":"Migration aborted. All Bucardo triggers have been removed from your Heroku database.","error":null,"started_at":"${PERSISTED_STARTED}","completed_at":"${PERSISTED_COMPLETED}"}
+EOF
+    ;;
   "cleaning_up")
     echo "Migration was cleaning up. Showing status. You may need to re-run cleanup."
     cat > /opt/bucardo/state/status.json <<EOF
@@ -147,7 +153,7 @@ STATUS_SERVER_PID=$!
 # ---------------------------------------------------------------------------
 # Start PostgreSQL and Bucardo infrastructure (needed for all active states)
 # ---------------------------------------------------------------------------
-if [ "$PERSISTED_PHASE" != "completed" ]; then
+if [ "$PERSISTED_PHASE" != "completed" ] && [ "$PERSISTED_PHASE" != "aborted" ]; then
   # Initialize PostgreSQL at runtime
   if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "Initializing PostgreSQL data directory..."

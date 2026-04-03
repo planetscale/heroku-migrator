@@ -762,6 +762,7 @@
         case 'switched': return 'badge-yellow';
         case 'cleaning_up': return 'badge-orange';
         case 'completed': return 'badge-green';
+        case 'aborted': return 'badge-orange';
         case 'error': return 'badge-red';
         default: return 'badge-gray';
       }
@@ -777,6 +778,7 @@
         case 'switched': return 'accent-yellow';
         case 'cleaning_up': return 'accent-orange';
         case 'completed': return 'accent-green';
+        case 'aborted': return 'accent-orange';
         case 'error': return 'accent-red';
         default: return '';
       }
@@ -831,6 +833,9 @@
       }
       if (phase === 'completed') {
         return { tone: 'next-green', main: 'Migration completed. Monitor app behavior on PlanetScale.', sub: 'When confident, remove temporary migration resources.' };
+      }
+      if (phase === 'aborted') {
+        return { tone: 'next-orange', main: 'Migration was aborted. No data was migrated.', sub: 'Bucardo triggers have been removed from your Heroku database. You can safely delete this app.' };
       }
       if (phase === 'error') {
         return { tone: 'next-red', main: 'Review logs and error details before retrying.', sub: data.error || 'Fix the issue, then re-run the failed step.' };
@@ -957,7 +962,7 @@
       const phase = data.phase || '';
       const copyPhase = data.bucardo && data.bucardo.initial_copy_phase;
       const inInitialCopy = copyPhase === 'in-progress' || ['starting', 'configuring', 'ready_to_copy', 'copying'].includes(phase);
-      const inReplication = ['replicating', 'switched', 'cleaning_up', 'completed'].includes(phase) && copyPhase !== 'in-progress';
+      const inReplication = ['replicating', 'switched', 'cleaning_up', 'completed', 'aborted'].includes(phase) && copyPhase !== 'in-progress';
       const showCutoverReadiness = ['replicating', 'switched'].includes(phase);
       setVisibleById('statusReadinessItem', showCutoverReadiness);
       setVisibleById('bucardoCopyItem', true);
@@ -1295,6 +1300,15 @@
           + '<li><span class="step-num">2</span><span class="step-text"><strong>Delete this migration app.</strong> Run <code>heroku apps:destroy</code> or remove it from the Heroku dashboard. It\'s no longer needed.</span></li>'
           + '<li><span class="step-num">3</span><span class="step-text"><strong>Remove the Heroku Postgres add-on</strong> from your main app when you\'re confident everything is working on PlanetScale.</span></li>'
           + '</ol>';
+
+      } else if (phase === 'aborted') {
+        step.textContent = '';
+        setGuideIndicator('none');
+        title.textContent = 'Migration aborted';
+        body.innerHTML = '<p>The migration was aborted and all Bucardo replication triggers have been removed from your Heroku database. No data was migrated to PlanetScale.</p>'
+          + '<div class="guide-callout">Your Heroku database is unchanged and your app is still running normally on Heroku.</div>'
+          + '<p>We recommend running <code>ANALYZE</code> on your Heroku database to refresh query plan statistics after trigger removal.</p>'
+          + '<p>You can safely delete this migration app when ready.</p>';
 
       } else if (phase === 'error') {
         step.textContent = '';
