@@ -303,6 +303,26 @@ rescue StandardError
   []
 end
 
+# Returns public tables that have no primary key and no unique index.
+# Bucardo needs at least one to reliably identify rows during replication.
+def check_tables_without_pk_or_unique
+  return [] unless HEROKU_URL
+
+  query = "SELECT c.relname FROM pg_class c " \
+          "JOIN pg_namespace n ON n.oid = c.relnamespace " \
+          "WHERE n.nspname = 'public' AND c.relkind = 'r' " \
+          "AND NOT EXISTS (" \
+          "  SELECT 1 FROM pg_index i " \
+          "  WHERE i.indrelid = c.oid " \
+          "  AND (i.indisprimary OR i.indisunique)" \
+          ") ORDER BY c.relname;"
+  output = `psql "#{HEROKU_URL}" -A -t -c "#{query}" 2>/dev/null`.strip
+  return [] if output.empty?
+  output.split("\n").map { |t| normalize_table_name(t) }.compact.uniq
+rescue StandardError
+  []
+end
+
 def capture_table_size_estimates
   return nil unless HEROKU_URL
 
@@ -718,6 +738,18 @@ server.mount_proc "/health" do |req, res|
   res.body = JSON.generate({ ok: true, timestamp: Time.now.utc.iso8601 })
 end
 
+# GET /preflight-checks - automated pre-migration validation
+server.mount_proc "/preflight-checks" do |req, res|
+  require_auth(req, res)
+  res.content_type = "application/json"
+
+  tables = check_tables_without_pk_or_unique
+  res.body = JSON.generate({
+    tables_without_pk_or_unique: tables,
+    all_tables_valid: tables.empty?,
+  })
+end
+
 # GET / (dashboard)
 server.mount_proc "/" do |req, res|
   # Only handle exact root path; let other routes handle themselves
@@ -824,6 +856,18 @@ server.mount_proc "/start-migration" do |req, res|
   current = read_status_file
   unless current["phase"] == "waiting" || current["phase"] == "unknown"
     res.body = JSON.generate({ success: false, message: "Migration already in progress or completed (phase: #{current["phase"]})" })
+    next
+  end
+
+  # Block if any tables lack a primary key or unique index
+  bad_tables = check_tables_without_pk_or_unique
+  unless bad_tables.empty?
+    res.body = JSON.generate({
+      success: false,
+      message: "Cannot start migration: #{bad_tables.length} table(s) have no primary key or unique index. " \
+               "Bucardo requires one to track rows. Add a primary key or unique index to: #{bad_tables.join(', ')}",
+      tables_without_pk_or_unique: bad_tables,
+    })
     next
   end
 
@@ -1250,6 +1294,37 @@ server.mount_proc "/cleanup" do |req, res|
   end
 
   res.body = JSON.generate({ success: true, message: "Cleanup started. Check /status for progress." })
+end
+
+# POST /retry - reset to waiting so the user can fix issues and start again
+server.mount_proc "/retry" do |req, res|
+  require_auth(req, res)
+
+  unless req.request_method == "POST"
+    res.status = 405
+    res.content_type = "application/json"
+    res.body = JSON.generate({ error: "Method not allowed" })
+    next
+  end
+
+  res.content_type = "application/json"
+
+  current = read_status_file
+  unless current["phase"] == "error"
+    res.status = 409
+    res.body = JSON.generate({ success: false, error: "Retry is only available when the migration is in an error state (current phase: #{current["phase"]})." })
+    next
+  end
+
+  File.write(STATUS_FILE, JSON.generate({
+    phase: "waiting",
+    state: "ready",
+    message: "Ready to start migration.",
+    error: nil,
+  }))
+  write_persistent_state("waiting")
+
+  res.body = JSON.generate({ success: true, message: "Migration reset. You can start again when ready." })
 end
 
 # POST /abort - emergency stop: removes all Bucardo triggers and replication from any active phase

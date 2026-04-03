@@ -236,6 +236,29 @@
       border-left-color: #1e9de7;
       background: rgba(30, 157, 231, 0.08);
     }
+    .guide-callout-error {
+      border-left-color: #e74c3c;
+      background: rgba(231, 76, 60, 0.08);
+    }
+    .guide-callout-success {
+      border-left-color: #27ae60;
+      background: rgba(39, 174, 96, 0.08);
+    }
+    .preflight-table-list {
+      font-family: 'SF Mono', 'Menlo', monospace;
+      font-size: 12px;
+      margin: 8px 0 4px;
+      padding: 0;
+      list-style: none;
+    }
+    .preflight-table-list li {
+      padding: 3px 0;
+      color: #e0e0e0;
+    }
+    .preflight-table-list li::before {
+      content: '\2022 ';
+      color: #e74c3c;
+    }
 
     /* Guide actions (buttons within guide) */
     .guide-actions {
@@ -722,8 +745,11 @@
     let latestLogsData = {};
     const preflightChecks = {
       extensionsReady: false,
-      storageReady: false
+      storageReady: false,
+      tablesReady: false
     };
+    let preflightCheckRan = false;
+    let preflightBadTables = [];
 
     // ---- Phase helpers ----
     function phaseBadgeClass(phase) {
@@ -829,7 +855,39 @@
     function updatePreflightChecklistState() {
       const startBtn = document.getElementById('startMigrationBtn');
       if (!startBtn) return;
-      startBtn.disabled = !(preflightChecks.extensionsReady && preflightChecks.storageReady);
+      startBtn.disabled = !(preflightChecks.extensionsReady && preflightChecks.storageReady && preflightChecks.tablesReady);
+    }
+
+    function runPreflightChecks() {
+      const container = document.getElementById('preflightTableCheck');
+      if (!container) return;
+      container.innerHTML = '<span class="text-muted">Checking tables for primary keys...</span>';
+      fetch('/preflight-checks', { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(data => {
+          preflightCheckRan = true;
+          preflightBadTables = data.tables_without_pk_or_unique || [];
+          if (data.all_tables_valid) {
+            preflightChecks.tablesReady = true;
+            container.innerHTML = '<div class="guide-callout guide-callout-success">All tables have a primary key or unique index.</div>';
+          } else {
+            preflightChecks.tablesReady = false;
+            let tableItems = preflightBadTables.map(t => '<li>' + escapeHtml(t) + '</li>').join('');
+            container.innerHTML = '<div class="guide-callout guide-callout-error">'
+              + '<strong>' + preflightBadTables.length + ' table(s) missing a primary key or unique index</strong>'
+              + '<p style="margin:8px 0 4px;">Bucardo requires every table to have a primary key or unique index to track rows during replication. Add one to each table listed below in your Heroku database before starting.</p>'
+              + '<ul class="preflight-table-list">' + tableItems + '</ul>'
+              + '<p style="margin:8px 0 0; font-size:12px; color:#a1a1a1;">Example fix: <code>ALTER TABLE table_name ADD PRIMARY KEY (id);</code></p>'
+              + '</div>'
+              + '<button class="btn btn-secondary btn-sm" style="margin-top:8px;" onclick="runPreflightChecks()">Re-check Tables</button>';
+          }
+          updatePreflightChecklistState();
+        })
+        .catch(() => {
+          preflightChecks.tablesReady = false;
+          container.innerHTML = '<div class="guide-callout guide-callout-error">Failed to check tables. <button class="btn btn-secondary btn-sm" style="margin-left:8px;" onclick="runPreflightChecks()">Retry</button></div>';
+          updatePreflightChecklistState();
+        });
     }
 
     function readinessBadgeClass(level) {
@@ -1079,6 +1137,7 @@
           + '<li><span class="step-num">2</span><span class="step-text">All existing data will be copied, and real-time replication will begin. Your Heroku app continues running normally.</span></li>'
           + '<li><span class="step-num">3</span><span class="step-text">When you\'re ready, you\'ll switch traffic by blocking writes to Heroku and pointing your app to PlanetScale.</span></li>'
           + '</ol>'
+          + '<div id="preflightTableCheck" style="margin-bottom:12px;"></div>'
           + '<div class="guide-callout">'
           + '<strong>Before you start, confirm both items:</strong>'
           + '<div style="margin-top:10px;">'
@@ -1095,6 +1154,7 @@
           + '<div class="guide-callout guide-callout-info">Your Heroku database will not be modified until you explicitly click "Switch Traffic" later in the process. It is safe to start.</div>'
           + '<div class="guide-actions"><button class="btn btn-primary" id="startMigrationBtn" onclick="startMigration(this)">Start Migration</button></div>';
         updatePreflightChecklistState();
+        if (!preflightCheckRan) runPreflightChecks();
         return;
 
       } else if (phase === 'starting' || phase === 'configuring') {
@@ -1240,10 +1300,17 @@
         step.textContent = '';
         setGuideIndicator('none');
         title.textContent = 'Something went wrong';
+        const errorState = data.state || '';
+        const isSetupFailure = errorState === 'setup_failed';
         body.innerHTML = '<p>An error occurred during the migration. Check the error details and logs below for more information.</p>'
           + '<div class="guide-callout">Your Heroku database has not been modified. Your app is still running normally on Heroku.</div>'
-          + '<p>If you need help, <a href="https://planetscale.com/contact" target="_blank">contact the PlanetScale team</a>.</p>'
-          + '<div class="guide-actions"><button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button></div>';
+          + (isSetupFailure
+            ? '<p>This error occurred during initial setup. Fix the issue (e.g., add missing primary keys), then click Retry to start again.</p>'
+            : '<p>If you need help, <a href="https://planetscale.com/contact" target="_blank">contact the PlanetScale team</a>.</p>')
+          + '<div class="guide-actions">'
+          + '<button class="btn btn-primary btn-sm" onclick="retryMigration(this)">Retry Migration</button> '
+          + '<button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button>'
+          + '</div>';
 
       } else {
         step.textContent = '';
@@ -1388,8 +1455,8 @@
 
     // ---- Start Migration ----
     function startMigration(btn) {
-      if (!(preflightChecks.extensionsReady && preflightChecks.storageReady)) {
-        showActionResult('warning', 'Checklist incomplete', 'Please confirm both pre-start checklist items before starting the migration.');
+      if (!(preflightChecks.extensionsReady && preflightChecks.storageReady && preflightChecks.tablesReady)) {
+        showActionResult('warning', 'Checklist incomplete', 'Please confirm all pre-start checklist items and resolve any table issues before starting the migration.');
         return;
       }
       btn.disabled = true;
@@ -1411,6 +1478,31 @@
           btn.textContent = 'Start Migration';
           console.error('Start migration failed:', err);
           showActionResult('error', 'Migration failed to start', 'Network or server error while starting migration.');
+        });
+    }
+
+    // ---- Retry Migration ----
+    function retryMigration(btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner spinner-dark"></span> Resetting...';
+      fetch('/retry', { method: 'POST', credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(data => {
+          if (data.success) {
+            showActionResult('success', 'Migration reset', data.message || 'You can start the migration again.');
+            preflightCheckRan = false;
+            preflightChecks.tablesReady = false;
+            refreshStatus();
+          } else {
+            btn.disabled = false;
+            btn.textContent = 'Retry Migration';
+            showActionResult('error', 'Retry failed', data.error || 'Failed to reset migration.');
+          }
+        })
+        .catch(() => {
+          btn.disabled = false;
+          btn.textContent = 'Retry Migration';
+          showActionResult('error', 'Retry failed', 'Network or server error.');
         });
     }
 
