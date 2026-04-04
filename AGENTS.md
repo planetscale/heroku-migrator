@@ -57,7 +57,7 @@ PlanetScale needs at least **2x** the Heroku database size. Check current Heroku
 heroku pg:info -a <app-name>
 ```
 
-Look for "Data Size". If Heroku uses 10 GB, PlanetScale needs at least 20 GB.
+Look for "Data Size". If Heroku uses 10 GB, PlanetScale needs at least 20 GB. This is due to the amount of WAL which can be generated during the migration. Postgres will vacuum it up quickly, but running out of space will break the migration and it's not worth the risk. The user can always downsize their PlanetScale database after the migration is complete.
 
 ### 4. Dyno sizing
 
@@ -254,3 +254,4 @@ SELECT count(*) FROM pg_namespace WHERE nspname = 'bucardo';     -- expect 0
 ```
 
 Always use a **fresh PlanetScale branch/database** for the next attempt after cleanup.
+:w
