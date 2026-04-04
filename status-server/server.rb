@@ -226,9 +226,7 @@ def get_bucardo_status
         "good"
       elsif state == "Bad"
         "bad"
-      elsif normalized.match?(/\A(insert|update|delete|truncate|copy)\b/)
-        # Bucardo can report the current SQL action being replayed. This is a
-        # normal in-flight replication state, not table deletion.
+      elsif normalized.match?(/\A(insert|update|delete|truncate|copy|delta_check|begin txn|counting)\b/)
         "applying_changes"
       else
         "unknown"
