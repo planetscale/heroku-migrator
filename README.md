@@ -109,14 +109,10 @@ If you want extra confidence before cutover, run these checks on your source Her
 ```bash
 # 1) Verify non-default extensions in use
 heroku pg:psql -a your-app-name -c "SELECT extname, extversion FROM pg_extension WHERE extname != 'plpgsql' ORDER BY extname;"
-```
 
-```bash
 # 2) Verify the migrator role can read/write tables (for realistic validation runs)
 heroku pg:psql -a your-app-name -c "SELECT table_name, has_table_privilege(current_user, format('public.%I', table_name), 'SELECT,INSERT,UPDATE,DELETE') FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;"
-```
 
-```bash
 # 3) Optional table sanity snapshot
 heroku pg:psql -a your-app-name -c "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename;"
 ```
@@ -160,14 +156,14 @@ You'll be prompted for a password. Enter the `PASSWORD` you set above. The usern
 
 ### Which dyno size should I use?
 
-The migrator runs PostgreSQL and Bucardo inside the dyno, so it needs more memory than a typical web app. Memory usage scales with **write volume**, not just data size -- high-write databases produce more delta tracking data for Bucardo to process.
+The migrator runs PostgreSQL and Bucardo inside the dyno, so it needs more memory than a typical web app. Memory usage scales with both **data size** and **write volume**.
 
 - **Standard-1x (512 MB)**: Small databases with low write volume (under 1 million rows, fewer than 20 tables).
-- **Standard-2x (1 GB)**: Most migrations with moderate write volume.
-- **Performance-M (2.5 GB)**: Large databases, high write throughput, many tables, or if you see R14 memory errors on Standard-2x.
-- **Performance-L (14 GB)**: Very large databases (100+ GB) with high-write, high-contention tables. If your Heroku database is already under heavy load, start here.
+- **Standard-2x (1 GB)**: Databases under 50 GB with moderate write volume.
+- **Performance-M (2.5 GB)**: Databases between 50-100 GB, high write throughput, or many tables. Also use this if you see R14 memory errors on Standard-2x.
+- **Performance-L (14 GB)**: **Databases over 100 GB**, or any database with very high write volume. The initial copy and ongoing replication for large databases can consume several GB of RAM. Smaller dynos will OOM and crash.
 
-This is a temporary app. You'll delete it after the migration is complete, so the cost is minimal. When in doubt, start with Performance-M.
+This is a temporary app. You'll delete it after the migration is complete, so the cost is minimal. When in doubt, start with Performance-L for databases over 100 GB, or Performance-M for everything else.
 
 **Watch for R14 memory errors.** If the migrator dyno runs out of memory, Bucardo can't keep up with replication, causing delays to grow and potentially cascading into performance issues on your Heroku database. Monitor with:
 
