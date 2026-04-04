@@ -1169,7 +1169,8 @@ server.mount_proc "/switch-traffic" do |req, res|
     bucardo_status: get_bucardo_status,
   )
 
-  force_override = %w[1 true yes].include?(req.query["force"]&.to_s&.downcase)
+  query_params = WEBrick::HTTPUtils.parse_query(req.query_string || "")
+  force_override = %w[1 true yes].include?(query_params["force"]&.to_s&.downcase)
   if readiness["level"] == "blocked"
     res.status = 409
     res.body = JSON.generate({
