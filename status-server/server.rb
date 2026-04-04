@@ -640,13 +640,24 @@ def build_progress_signals(phase:, bucardo_status:, readiness:)
   }
 end
 
+def recent_good_sync?(bucardo_status, max_age_seconds = 120)
+  last_good = parse_time_safe(bucardo_status["last_good_sync"])
+  last_good && (Time.now.utc - last_good).to_i <= max_age_seconds
+end
+
 def bucardo_healthy_for_replication?(bucardo_status)
   return false unless bucardo_status.is_a?(Hash)
+
   current_state = bucardo_status["current_state"]
-  return false unless ["good", "applying_changes"].include?(current_state)
+  known_healthy = ["good", "applying_changes"].include?(current_state)
+
+  # If the state is unrecognized but syncs are completing, trust the evidence.
+  return false unless known_healthy || recent_good_sync?(bucardo_status)
 
   last_error = bucardo_status["last_error"]&.to_s&.strip
-  return false if last_error && !last_error.empty?
+  if last_error && !last_error.empty?
+    return false unless recent_good_sync?(bucardo_status)
+  end
 
   true
 end
@@ -674,7 +685,7 @@ def build_cutover_readiness(phase:, bucardo_status:)
         hard_blockers << "initial_copy_not_finished"
       end
 
-      hard_blockers << "replication_not_healthy" unless bucardo_healthy_for_replication?(bucardo_status)
+      soft_blockers << "replication_not_healthy" unless bucardo_healthy_for_replication?(bucardo_status)
     end
   end
 
@@ -682,7 +693,15 @@ def build_cutover_readiness(phase:, bucardo_status:)
     {
       "level" => "blocked",
       "can_force" => false,
-      "message" => "Cutover is blocked until replication health checks pass.",
+      "message" => "Cutover is blocked until safety checks pass.",
+      "hard_blockers" => hard_blockers,
+      "soft_blockers" => soft_blockers,
+    }
+  elsif soft_blockers.any?
+    {
+      "level" => "warning",
+      "can_force" => true,
+      "message" => "Cutover has warnings. You can override if replication appears healthy.",
       "hard_blockers" => hard_blockers,
       "soft_blockers" => soft_blockers,
     }
