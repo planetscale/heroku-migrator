@@ -37,6 +37,7 @@ fi
 if [ "$SKIP_SCHEMA" -eq 0 ]; then
   echo "Copying schema from primary to replica..."
   pg_dump --no-owner --no-privileges --no-publications --no-subscriptions --schema-only "$PRIMARY" |
+  grep -v -E "^COMMENT ON EXTENSION " |
   psql "$REPLICA" -a --set ON_ERROR_STOP=1
 else
   echo "Skipping schema copy (--skip-schema flag set)"
