@@ -64,6 +64,42 @@ bucardo add database "planetscale" \
 bucardo add all sequences --relgroup "planetscale_import"
 bucardo add all tables --relgroup "planetscale_import"
 
+# Bucardo 5.6 does not filter out PostgreSQL generated columns when issuing
+# COPY against the target, which fails with "column ... is a generated column /
+# Generated columns cannot be used in COPY". For every table that has at least
+# one generated column, register a customcols entry against the planetscale db
+# that selects only the non-generated columns. The target already has the
+# generation expression (it came across via pg_dump --schema-only), so Postgres
+# recomputes the value on insert.
+GENERATED_TABLES=$(psql "$PRIMARY" -A -t -F"|" -c "
+  SELECT DISTINCT n.nspname, c.relname
+  FROM pg_attribute a
+  JOIN pg_class c ON c.oid = a.attrelid
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'public' AND c.relkind = 'r'
+    AND a.attnum > 0 AND NOT a.attisdropped
+    AND a.attgenerated <> ''
+  ORDER BY n.nspname, c.relname;")
+
+if [ -n "$GENERATED_TABLES" ]; then
+  echo "Detected tables with generated columns; registering customcols overrides..."
+  echo "$GENERATED_TABLES" | while IFS='|' read -r schema table; do
+    [ -z "$table" ] && continue
+    cols=$(psql "$PRIMARY" -A -t -c "
+      SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum)
+      FROM pg_attribute
+      WHERE attrelid = '${schema}.${table}'::regclass
+        AND attnum > 0 AND NOT attisdropped
+        AND attgenerated = '';")
+    if [ -z "$cols" ]; then
+      echo "  Skipping ${schema}.${table}: no non-generated columns found"
+      continue
+    fi
+    echo "  Excluding generated columns on ${schema}.${table} via customcols"
+    bucardo add customcols "${schema}.${table}" "SELECT ${cols}" db=planetscale
+  done
+fi
+
 # Add the sync configuration to Bucardo.
 if [ "$NO_INITIAL_COPY" -eq 0 ]; then
   echo "Configuring sync with initial data copy..."

@@ -748,6 +748,7 @@
     };
     let preflightCheckRan = false;
     let preflightBadTables = [];
+    let preflightGeneratedTables = [];
 
     // ---- Phase helpers ----
     function phaseBadgeClass(phase) {
@@ -868,20 +869,39 @@
       const container = document.getElementById('preflightTableCheck');
       if (!container) return;
       const passedSection = document.getElementById('preflightPassedSection');
-      if (preflightBadTables.length === 0) {
-        container.innerHTML = '';
-        if (passedSection) passedSection.style.display = '';
-      } else {
+
+      let html = '';
+
+      if (preflightBadTables.length > 0) {
         let tableItems = preflightBadTables.map(t => '<li>' + escapeHtml(t) + '</li>').join('');
-        container.innerHTML = '<div class="guide-callout guide-callout-error">'
+        html += '<div class="guide-callout guide-callout-error">'
           + '<strong>' + preflightBadTables.length + ' table(s) missing a primary key or unique index</strong>'
           + '<p style="margin:8px 0 4px;">Bucardo requires every table to have a primary key or unique index to track rows during replication. Add one to each table listed below in your Heroku database before starting.</p>'
           + '<ul class="preflight-table-list">' + tableItems + '</ul>'
           + '<p style="margin:8px 0 0; font-size:12px; color:#a1a1a1;">Example fix: <code>ALTER TABLE table_name ADD PRIMARY KEY (id);</code></p>'
-          + '</div>'
-          + '<button class="btn btn-secondary btn-sm" style="margin-top:8px;" onclick="runPreflightChecks()">Re-check Tables</button>';
-        if (passedSection) passedSection.style.display = 'none';
+          + '</div>';
       }
+
+      if (preflightGeneratedTables.length > 0) {
+        let genItems = preflightGeneratedTables.map(function (t) {
+          const cols = (t.columns || []).map(escapeHtml).join(', ');
+          return '<li><strong>' + escapeHtml(t.table) + '</strong>: ' + cols + '</li>';
+        }).join('');
+        html += '<div class="guide-callout">'
+          + '<strong>' + preflightGeneratedTables.length + ' table(s) contain generated columns</strong>'
+          + '<p style="margin:8px 0 4px;">Bucardo cannot include PostgreSQL generated columns in <code>COPY</code>. The migrator will automatically register <code>customcols</code> overrides so these columns are excluded from the COPY stream and PostgreSQL recomputes them on PlanetScale. No action required.</p>'
+          + '<ul class="preflight-table-list">' + genItems + '</ul>'
+          + '</div>';
+      }
+
+      if (preflightBadTables.length > 0) {
+        html += '<button class="btn btn-secondary btn-sm" style="margin-top:8px;" onclick="runPreflightChecks()">Re-check Tables</button>';
+        if (passedSection) passedSection.style.display = 'none';
+      } else {
+        if (passedSection) passedSection.style.display = '';
+      }
+
+      container.innerHTML = html;
     }
 
     function runPreflightChecks() {
@@ -893,6 +913,7 @@
         .then(data => {
           preflightCheckRan = true;
           preflightBadTables = data.tables_without_pk_or_unique || [];
+          preflightGeneratedTables = data.tables_with_generated_columns || [];
           renderCachedPreflightResult();
           if (data.all_tables_valid) {
             preflightChecks.tablesReady = true;

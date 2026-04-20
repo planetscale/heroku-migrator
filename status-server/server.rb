@@ -321,6 +321,39 @@ rescue StandardError
   []
 end
 
+# Returns public tables that contain at least one generated column, along with
+# the names of those columns. Bucardo 5.6 cannot include generated columns in
+# COPY, so the migrator's setup script registers customcols overrides for them
+# automatically. This check is informational only -- it does NOT block start.
+def check_tables_with_generated_columns
+  return [] unless HEROKU_URL
+
+  query = "SELECT c.relname, a.attname " \
+          "FROM pg_attribute a " \
+          "JOIN pg_class c ON c.oid = a.attrelid " \
+          "JOIN pg_namespace n ON n.oid = c.relnamespace " \
+          "WHERE n.nspname = 'public' AND c.relkind = 'r' " \
+          "  AND a.attnum > 0 AND NOT a.attisdropped " \
+          "  AND a.attgenerated <> '' " \
+          "ORDER BY c.relname, a.attnum;"
+  output = `psql "#{HEROKU_URL}" -A -t -F"|" -c "#{query}" 2>/dev/null`.strip
+  return [] if output.empty?
+
+  by_table = {}
+  output.split("\n").each do |line|
+    parts = line.strip.split("|")
+    next unless parts.length == 2
+    table = normalize_table_name(parts[0])
+    column = parts[1].to_s.strip
+    next if table.nil? || column.empty?
+    (by_table[table] ||= []) << column
+  end
+
+  by_table.map { |table, columns| { "table" => table, "columns" => columns.uniq } }
+rescue StandardError
+  []
+end
+
 def capture_table_size_estimates
   return nil unless HEROKU_URL
 
@@ -761,9 +794,11 @@ server.mount_proc "/preflight-checks" do |req, res|
   res.content_type = "application/json"
 
   tables = check_tables_without_pk_or_unique
+  generated = check_tables_with_generated_columns
   res.body = JSON.generate({
     tables_without_pk_or_unique: tables,
     all_tables_valid: tables.empty?,
+    tables_with_generated_columns: generated,
   })
 end
 

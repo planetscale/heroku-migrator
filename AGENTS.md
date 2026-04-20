@@ -96,7 +96,11 @@ Parse the Heroku host to identify the region:
 
 Match the PlanetScale database region accordingly (e.g., `us-east` for Heroku `us-east-1`).
 
-### 7. Fresh PlanetScale target
+### 7. Generated columns
+
+PostgreSQL `GENERATED ALWAYS AS ... STORED` columns are handled automatically by the migrator -- it registers a `customcols` override against the PlanetScale side that omits each generated column from `COPY`, and PlanetScale recomputes the value on insert. No user action required. The dashboard's preflight section lists any affected tables for visibility.
+
+### 8. Fresh PlanetScale target
 
 Always use a clean PlanetScale database or branch for each migration attempt. Retrying against a target that has leftover tables/data from a failed run will cause errors.
 
@@ -105,6 +109,40 @@ Always use a clean PlanetScale database or branch for each migration attempt. Re
 ### "Could not find TABLE inside public schema on database planetscale"
 
 The schema copy (`pg_dump | psql`) failed silently for one or more tables. The table exists on Heroku but wasn't created on PlanetScale. Check the **Setup Log** in the dashboard (or `GET /logs` → `setup` field) for the actual `psql` error. Most common cause: a missing extension on PlanetScale that the table depends on.
+
+### "Generated columns cannot be used in COPY"
+
+```
+Failed : DBD::Pg::db do failed: ERROR: column "<colname>" is a generated column
+DETAIL: Generated columns cannot be used in COPY.
+```
+
+Bucardo 5.6 does not filter out PostgreSQL `GENERATED ALWAYS AS ... STORED` columns when building the `COPY` it issues against the target. Any sync containing a table with a generated column will fail with this error during the initial copy and during ongoing replication.
+
+**Current migrator (with auto-fix):** [scripts/mk-bucardo-repl.sh](scripts/mk-bucardo-repl.sh) detects generated columns and registers `bucardo add customcols ... db=planetscale` overrides automatically. The setup log will show `Excluding generated columns on public.<table> via customcols`. The dashboard's preflight section also lists affected tables as an informational note. No user action required.
+
+**Older migrator (manual workaround):** If a user is on a version of the migrator without the auto-fix and they hit this error, they can apply the workaround inside the migration dyno (`heroku ps:exec -a <migration-app>`):
+
+1. Identify generated columns:
+
+   ```sql
+   SELECT n.nspname, c.relname, a.attname
+   FROM pg_attribute a
+   JOIN pg_class c ON c.oid = a.attrelid
+   JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'public' AND c.relkind = 'r'
+     AND a.attnum > 0 AND NOT a.attisdropped
+     AND a.attgenerated <> ''
+   ORDER BY n.nspname, c.relname, a.attnum;
+   ```
+
+2. For each affected table, register a customcols override that omits the generated column(s) (the PlanetScale target already has the generation expression and will recompute the value on insert):
+
+   ```bash
+   bucardo add customcols public.<table> "SELECT id, col_a, col_b, ..." db=planetscale
+   ```
+
+3. Abort the migration in the dashboard, recreate the PlanetScale target as a fresh database/branch, and start the migration again.
 
 ### Deadlock during validate_sync
 
