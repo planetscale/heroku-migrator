@@ -1,0 +1,423 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  EC2 instance running heroku-migrator (Docker + Bucardo) for Heroku Postgres to
+  PlanetScale migrations (Ubuntu 24.04 LTS). Installs Docker, clones the repo, and
+  manages the migrator with docker-compose and systemd. The Docker image build happens
+  in the background after CloudFormation signals success, so stack creation completes
+  in ~5 minutes. Recommended instance types: memory-optimized (m7i) or compute-optimized (c7i).
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Resource Naming"
+        Parameters:
+          - ResourcePrefix
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - VpcId
+          - SubnetId
+          - DashboardAccessCidr
+      - Label:
+          default: "Instance Configuration"
+        Parameters:
+          - InstanceType
+          - VolumeSize
+          - KeyPairName
+    ParameterLabels:
+      ResourcePrefix:
+        default: "Resource Name Prefix"
+      VpcId:
+        default: "VPC ID"
+      SubnetId:
+        default: "Subnet ID (needs outbound internet access)"
+      DashboardAccessCidr:
+        default: "Dashboard Access CIDR (Optional)"
+      InstanceType:
+        default: "EC2 Instance Type"
+      VolumeSize:
+        default: "EBS Volume Size (GB)"
+      KeyPairName:
+        default: "EC2 Key Pair (Optional)"
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: 'ps-heroku-migration'
+    Description: 'Prefix for all resource names'
+    AllowedPattern: '[a-z0-9-]+'
+    ConstraintDescription: 'Must be lowercase alphanumeric with hyphens only'
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where the instance will be launched
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      Subnet with outbound internet access. Required to pull Docker images from
+      GitHub, reach your Heroku database, and connect to PlanetScale. The source
+      Heroku database must also be network-accessible from this subnet.
+
+  DashboardAccessCidr:
+    Type: String
+    Default: '0.0.0.0/0'
+    Description: >-
+      CIDR allowed to access the migration dashboard on port 8080. Defaults to
+      0.0.0.0/0 (open to all IPs) — the dashboard requires a password so this
+      is acceptable for a temporary migration instance. Restrict to your IP
+      (e.g. 203.0.113.5/32) for tighter security.
+
+  InstanceType:
+    Type: String
+    Default: m7i.2xlarge
+    AllowedValues:
+      - m7i.xlarge
+      - m7i.2xlarge
+      - m7i.4xlarge
+      - m7i.8xlarge
+      - c7i.xlarge
+      - c7i.2xlarge
+      - c7i.4xlarge
+    Description: >-
+      Instance type. Bucardo runs PostgreSQL in-process, so memory matters:
+      watch for OOM with small instance types on large databases.
+
+  VolumeSize:
+    Type: Number
+    Default: 100
+    MinValue: 50
+    MaxValue: 5000
+    Description: >-
+      EBS volume size in GB (gp3). Needs to hold the Docker image (~2 GB) and
+      Bucardo working data. Rule of thumb: at least 2x your database size.
+
+  KeyPairName:
+    Type: String
+    Default: ''
+    Description: >-
+      EC2 Key Pair name for SSH access. Leave empty to use EC2 Instance Connect
+      (browser-based, no key needed) or SSM Session Manager only.
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
+
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-ec2-role'
+        - Key: Purpose
+          Value: Heroku to PlanetScale Migration
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for heroku-migrator EC2 instance
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound (Docker Hub, GitHub, Heroku, PlanetScale)
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-sg'
+        - Key: Purpose
+          Value: Heroku to PlanetScale Migration
+
+  SSHIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: 0.0.0.0/0
+      Description: SSH for EC2 Instance Connect and optional key-based access
+
+  DashboardIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      CidrIp: !Ref DashboardAccessCidr
+      Description: Migration dashboard direct access
+
+  ICMPIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: icmp
+      FromPort: 3
+      ToPort: -1
+      CidrIp: 0.0.0.0/0
+      Description: ICMP Destination Unreachable for path MTU discovery
+
+  Instance:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        # UserData installs Docker and writes configs (~10 min).
+        # The Docker image build runs via systemd after signaling.
+        Timeout: PT20M
+    Properties:
+      ImageId: '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}'
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref 'AWS::NoValue']
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: gp3
+            DeleteOnTermination: true
+            Encrypted: true
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+          STACK="${AWS::StackName}"
+          REGION="${AWS::Region}"
+          export DEBIAN_FRONTEND=noninteractive
+
+          # ---------------------------------------------------------------------------
+          # Install cfn-signal so we can always notify CloudFormation on exit,
+          # whether setup succeeds or fails.
+          # ---------------------------------------------------------------------------
+          apt-get update -y -q
+          apt-get install -y -q python3-pip python3-setuptools
+          pip3 install --quiet --break-system-packages \
+            https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+
+          # Trap fires on any exit — success or failure — so CloudFormation is never
+          # left waiting for the full timeout when something goes wrong mid-script.
+          _signal() {
+            local rc=$?
+            echo "Signaling CloudFormation: exit code $rc"
+            /usr/local/bin/cfn-signal -e "$rc" \
+              --stack "$STACK" --resource Instance --region "$REGION" 2>/dev/null || true
+          }
+          trap _signal EXIT
+          set -e
+
+          # ---------------------------------------------------------------------------
+          # Install Docker CE
+          # ---------------------------------------------------------------------------
+          apt-get install -y -q ca-certificates curl gnupg lsb-release git
+
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          chmod a+r /etc/apt/keyrings/docker.gpg
+
+          ARCH=$(dpkg --print-architecture)
+          CODENAME=$(lsb_release -cs)
+          echo "deb [arch=${!ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${!CODENAME} stable" \
+            > /etc/apt/sources.list.d/docker.list
+
+          apt-get update -y -q
+          apt-get install -y -q \
+            docker-ce docker-ce-cli containerd.io \
+            docker-buildx-plugin docker-compose-plugin
+
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ubuntu
+
+          # ---------------------------------------------------------------------------
+          # Create bind-mount directories owned by uid 1000 (the container user).
+          # chown rather than chmod 777 — the container runs as uid 1000:1000 and
+          # initdb requires the data directory to be owned by the process owner.
+          # ---------------------------------------------------------------------------
+          mkdir -p /opt/heroku-migrator/{pgdata,state,logs,run}
+          chown -R 1000:1000 \
+            /opt/heroku-migrator/pgdata \
+            /opt/heroku-migrator/state \
+            /opt/heroku-migrator/logs \
+            /opt/heroku-migrator/run
+
+          # ---------------------------------------------------------------------------
+          # Clone the heroku-migrator source (needed to build the Docker image)
+          # ---------------------------------------------------------------------------
+          git clone --depth 1 \
+            https://github.com/planetscale/heroku-migrator.git \
+            /opt/heroku-migrator/src
+
+          # ---------------------------------------------------------------------------
+          # Write docker-compose.yml
+          # tmpfs /tmp:mode=1777 — restores sticky bit stripped by the Dockerfile's
+          # "chmod 777 /tmp", which otherwise breaks Ruby's Dir.tmpdir and causes the
+          # dashboard to show stale status after the initial copy finishes.
+          # ---------------------------------------------------------------------------
+          cat > /opt/heroku-migrator/docker-compose.yml <<'COMPOSE'
+          services:
+            migrator:
+              build:
+                context: /opt/heroku-migrator/src
+              env_file:
+                - /opt/heroku-migrator/.env
+              environment:
+                - PORT=8080
+              # Run as uid 1000 (non-root). Required for two reasons:
+              # 1. initdb refuses to run as root (uid 0).
+              # 2. The Dockerfile was designed for Heroku's non-root runtime;
+              #    uid 1000 triggers the entrypoint's /etc/passwd self-registration.
+              user: "1000:1000"
+              # Bucardo writes bucardo.restart.reason.txt to the working directory.
+              # /opt/bucardo is owned by uid 1000 inside the image (chmod 777 in
+              # Dockerfile), so Bucardo can write there without permission errors.
+              working_dir: /opt/bucardo
+              # tmpfs /tmp:mode=1777 restores the sticky bit stripped by the
+              # Dockerfile's "chmod 777 /tmp", which otherwise breaks Ruby's
+              # Dir.tmpdir and causes the dashboard to show stale status.
+              tmpfs:
+                - /tmp:mode=1777
+              volumes:
+                - /opt/heroku-migrator/pgdata:/opt/bucardo/pgdata
+                - /opt/heroku-migrator/state:/opt/bucardo/state
+                - /opt/heroku-migrator/logs:/var/log/bucardo
+                - /opt/heroku-migrator/run:/var/run/bucardo
+              ports:
+                - "8080:8080"
+              restart: unless-stopped
+          COMPOSE
+
+          # ---------------------------------------------------------------------------
+          # Write .env placeholder — edit this before starting the migrator
+          # ---------------------------------------------------------------------------
+          cat > /opt/heroku-migrator/.env <<'ENV'
+          # Edit these values, then run: systemctl restart heroku-migrator
+          HEROKU_URL=postgres://CHANGE_ME_user:CHANGE_ME_password@CHANGE_ME_host:5432/CHANGE_ME_dbname?sslmode=require
+          PLANETSCALE_URL=postgresql://CHANGE_ME_user:CHANGE_ME_password@CHANGE_ME_host.connect.psdb.cloud:5432/CHANGE_ME_dbname?sslmode=require
+          PASSWORD=CHANGE_ME_password
+          ENV
+          chmod 600 /opt/heroku-migrator/.env
+
+          # ---------------------------------------------------------------------------
+          # Write systemd service
+          # ExecStartPre builds the Docker image (~15-20 min on first run).
+          # TimeoutStartSec=2400 allows 40 min for build + container start.
+          # ---------------------------------------------------------------------------
+          cat > /etc/systemd/system/heroku-migrator.service <<'SERVICE'
+          [Unit]
+          Description=Heroku to PlanetScale Migration (Bucardo/Docker)
+          After=docker.service network-online.target
+          Requires=docker.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          WorkingDirectory=/opt/heroku-migrator
+          ExecStartPre=/usr/bin/docker compose build
+          ExecStart=/usr/bin/docker compose up -d
+          ExecStop=/usr/bin/docker compose down
+          TimeoutStartSec=2400
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+
+          systemctl daemon-reload
+          systemctl enable heroku-migrator
+
+          # ---------------------------------------------------------------------------
+          # All setup complete. The trap fires here with exit code 0, signaling
+          # CloudFormation success. The Docker build then runs via systemd in the
+          # background — monitor with: journalctl -u heroku-migrator -f
+          # ---------------------------------------------------------------------------
+          set +e
+          systemctl start heroku-migrator &
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-ec2'
+        - Key: Purpose
+          Value: Heroku to PlanetScale Migration
+
+Outputs:
+  InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref Instance
+
+  PublicIP:
+    Description: Public IP address
+    Value: !GetAtt Instance.PublicIp
+
+  PrivateIP:
+    Description: Private IP address
+    Value: !GetAtt Instance.PrivateIp
+
+  SecurityGroupId:
+    Description: Security Group ID
+    Value: !Ref SecurityGroup
+
+  SSHCommand:
+    Description: SSH connection command (requires KeyPairName parameter)
+    Value: !Sub 'ssh -i /path/to/${KeyPairName}.pem ubuntu@${Instance.PublicIp}'
+
+  EC2InstanceConnectCommand:
+    Description: EC2 Instance Connect (browser SSH, no key required — open instance in EC2 console → Connect)
+    Value: !Sub 'aws ec2-instance-connect send-ssh-public-key --instance-id ${Instance} --instance-os-user ubuntu --ssh-public-key file://~/.ssh/id_rsa.pub --availability-zone ${Instance.AvailabilityZone}'
+
+  SessionManagerCommand:
+    Description: SSM Session Manager shell (no SSH key, no open ports required)
+    Value: !Sub 'aws ssm start-session --target ${Instance}'
+
+  DashboardPortForwardCommand:
+    Description: Forward dashboard port locally via SSM, then open http://localhost:8080
+    Value: !Sub >-
+      aws ssm start-session
+      --target ${Instance}
+      --document-name AWS-StartPortForwardingSession
+      --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+
+  EnvFileLocation:
+    Description: Edit this file with your credentials, then restart the service
+    Value: '/opt/heroku-migrator/.env'
+
+  RestartCommand:
+    Description: Restart the migrator after editing .env
+    Value: 'systemctl restart heroku-migrator'
+
+  BuildLogCommand:
+    Description: Monitor the Docker image build (runs in background after stack creation)
+    Value: 'journalctl -u heroku-migrator -f'
+
+  LogsCommand:
+    Description: Stream container logs (once build is complete and container is running)
+    Value: 'cd /opt/heroku-migrator && docker compose logs -f'
+
+  SetupGuide:
+    Description: Quick start (after connecting to the instance)
+    Value: >-
+      1. Edit /opt/heroku-migrator/.env with your HEROKU_URL, PLANETSCALE_URL, and PASSWORD.
+      2. Run: systemctl restart heroku-migrator
+      3. Forward port: use the DashboardPortForwardCommand output, then open http://localhost:8080
+      4. Log in with username "admin" and your PASSWORD.
+      5. Click Start Migration and follow the dashboard.
