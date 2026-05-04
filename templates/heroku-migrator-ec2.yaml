@@ -18,13 +18,13 @@ Metadata:
         Parameters:
           - VpcId
           - SubnetId
-          - DashboardAccessCidr
       - Label:
           default: "Instance Configuration"
         Parameters:
           - InstanceType
           - VolumeSize
           - KeyPairName
+          - YourPublicIP
     ParameterLabels:
       ResourcePrefix:
         default: "Resource Name Prefix"
@@ -32,14 +32,14 @@ Metadata:
         default: "VPC ID"
       SubnetId:
         default: "Subnet ID (needs outbound internet access)"
-      DashboardAccessCidr:
-        default: "Dashboard Access CIDR (Optional)"
       InstanceType:
         default: "EC2 Instance Type"
       VolumeSize:
         default: "EBS Volume Size (GB)"
       KeyPairName:
         default: "EC2 Key Pair (Optional)"
+      YourPublicIP:
+        default: "Your Public IPv4 (Optional — restricts SSH)"
 
 Parameters:
   ResourcePrefix:
@@ -60,15 +60,6 @@ Parameters:
       GitHub, reach your Heroku database, and connect to PlanetScale. The source
       Heroku database must also be network-accessible from this subnet.
 
-  DashboardAccessCidr:
-    Type: String
-    Default: '0.0.0.0/0'
-    Description: >-
-      CIDR allowed to access the migration dashboard on port 8080. Defaults to
-      0.0.0.0/0 (open to all IPs) — the dashboard requires a password so this
-      is acceptable for a temporary migration instance. Restrict to your IP
-      (e.g. 203.0.113.5/32) for tighter security.
-
   InstanceType:
     Type: String
     Default: m7i.2xlarge
@@ -88,10 +79,10 @@ Parameters:
     Type: Number
     Default: 100
     MinValue: 50
-    MaxValue: 5000
+    MaxValue: 1000
     Description: >-
       EBS volume size in GB (gp3). Needs to hold the Docker image (~2 GB) and
-      Bucardo working data. Rule of thumb: at least 2x your database size.
+      Bucardo working data. 
 
   KeyPairName:
     Type: String
@@ -100,8 +91,54 @@ Parameters:
       EC2 Key Pair name for SSH access. Leave empty to use EC2 Instance Connect
       (browser-based, no key needed) or SSM Session Manager only.
 
+  YourPublicIP:
+    Type: String
+    Default: ''
+    Description: >-
+      Your public IPv4 address to restrict SSH access (recommended). Leave empty
+      to allow SSH from anywhere. Get your IPv4 with: curl -4 icanhazip.com
+    AllowedPattern: '^$|^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'
+    ConstraintDescription: Must be empty or a valid IPv4 address (e.g., 203.0.113.123)
+
+Mappings:
+  # Source: https://ip-ranges.amazonaws.com/ip-ranges.json (service: EC2_INSTANCE_CONNECT)
+  EC2InstanceConnectCIDRs:
+    af-south-1:     { CIDR: '13.244.121.196/30' }
+    ap-east-1:      { CIDR: '43.198.192.104/29' }
+    ap-northeast-1: { CIDR: '3.112.23.0/29' }
+    ap-northeast-2: { CIDR: '13.209.1.56/29' }
+    ap-northeast-3: { CIDR: '15.168.105.160/29' }
+    ap-south-1:     { CIDR: '13.233.177.0/29' }
+    ap-south-2:     { CIDR: '18.60.252.248/29' }
+    ap-southeast-1: { CIDR: '3.0.5.32/29' }
+    ap-southeast-2: { CIDR: '13.239.158.0/29' }
+    ap-southeast-3: { CIDR: '43.218.193.64/29' }
+    ap-southeast-4: { CIDR: '16.50.248.80/29' }
+    ap-southeast-5: { CIDR: '43.216.87.48/29' }
+    ap-southeast-7: { CIDR: '43.209.155.96/29' }
+    ca-central-1:   { CIDR: '35.183.92.176/29' }
+    ca-west-1:      { CIDR: '40.176.213.168/29' }
+    eu-central-1:   { CIDR: '3.120.181.40/29' }
+    eu-central-2:   { CIDR: '16.63.77.8/29' }
+    eu-north-1:     { CIDR: '13.48.4.200/30' }
+    eu-south-1:     { CIDR: '15.161.135.164/30' }
+    eu-south-2:     { CIDR: '18.101.90.48/29' }
+    eu-west-1:      { CIDR: '18.202.216.48/29' }
+    eu-west-2:      { CIDR: '3.8.37.24/29' }
+    eu-west-3:      { CIDR: '35.180.112.80/29' }
+    il-central-1:   { CIDR: '51.16.183.224/29' }
+    me-central-1:   { CIDR: '3.29.147.40/29' }
+    me-south-1:     { CIDR: '16.24.46.56/29' }
+    mx-central-1:   { CIDR: '78.12.207.8/29' }
+    sa-east-1:      { CIDR: '18.228.70.32/29' }
+    us-east-1:      { CIDR: '18.206.107.24/29' }
+    us-east-2:      { CIDR: '3.16.146.0/29' }
+    us-west-1:      { CIDR: '13.52.6.112/29' }
+    us-west-2:      { CIDR: '18.237.140.160/29' }
+
 Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
+  HasPublicIP: !Not [!Equals [!Ref YourPublicIP, '']]
 
 Resources:
   InstanceRole:
@@ -150,18 +187,18 @@ Resources:
       IpProtocol: tcp
       FromPort: 22
       ToPort: 22
-      CidrIp: 0.0.0.0/0
-      Description: SSH for EC2 Instance Connect and optional key-based access
+      CidrIp: !If [HasPublicIP, !Sub '${YourPublicIP}/32', '0.0.0.0/0']
+      Description: !If [HasPublicIP, !Sub 'SSH restricted to ${YourPublicIP}', 'SSH open to all (specify YourPublicIP to restrict)']
 
-  DashboardIngress:
+  EC2InstanceConnectIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref SecurityGroup
       IpProtocol: tcp
-      FromPort: 8080
-      ToPort: 8080
-      CidrIp: !Ref DashboardAccessCidr
-      Description: Migration dashboard direct access
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !FindInMap [EC2InstanceConnectCIDRs, !Ref 'AWS::Region', CIDR]
+      Description: EC2 Instance Connect service IP range for this region
 
   ICMPIngress:
     Type: AWS::EC2::SecurityGroupIngress
@@ -304,8 +341,10 @@ Resources:
                 - /opt/heroku-migrator/state:/opt/bucardo/state
                 - /opt/heroku-migrator/logs:/var/log/bucardo
                 - /opt/heroku-migrator/run:/var/run/bucardo
+              # Bind to localhost only — dashboard is not exposed publicly.
+              # Access via SSH tunnel or SSM port forwarding (both encrypted).
               ports:
-                - "8080:8080"
+                - "127.0.0.1:8080:8080"
               restart: unless-stopped
           COMPOSE
 
@@ -377,25 +416,29 @@ Outputs:
     Description: Security Group ID
     Value: !Ref SecurityGroup
 
-  SSHCommand:
-    Description: SSH connection command (requires KeyPairName parameter)
-    Value: !Sub 'ssh -i /path/to/${KeyPairName}.pem ubuntu@${Instance.PublicIp}'
+  DashboardViaSshTunnel:
+    Description: "RECOMMENDED: Open encrypted SSH tunnel, then open http://localhost:8080"
+    Value: !Sub 'ssh -i /path/to/${KeyPairName}.pem -L 8080:localhost:8080 -N ubuntu@${Instance.PublicIp}'
 
-  EC2InstanceConnectCommand:
-    Description: EC2 Instance Connect (browser SSH, no key required — open instance in EC2 console → Connect)
-    Value: !Sub 'aws ec2-instance-connect send-ssh-public-key --instance-id ${Instance} --instance-os-user ubuntu --ssh-public-key file://~/.ssh/id_rsa.pub --availability-zone ${Instance.AvailabilityZone}'
-
-  SessionManagerCommand:
-    Description: SSM Session Manager shell (no SSH key, no open ports required)
-    Value: !Sub 'aws ssm start-session --target ${Instance}'
-
-  DashboardPortForwardCommand:
-    Description: Forward dashboard port locally via SSM, then open http://localhost:8080
+  DashboardViaSSM:
+    Description: "ALTERNATIVE: SSM port forward (no key needed), then open http://localhost:8080"
     Value: !Sub >-
       aws ssm start-session
       --target ${Instance}
       --document-name AWS-StartPortForwardingSession
       --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+
+  SSHCommand:
+    Description: SSH shell access (requires KeyPairName parameter)
+    Value: !Sub 'ssh -i /path/to/${KeyPairName}.pem ubuntu@${Instance.PublicIp}'
+
+  EC2InstanceConnectCommand:
+    Description: EC2 Instance Connect browser SSH (no key — EC2 console → Connect)
+    Value: !Sub 'aws ec2-instance-connect send-ssh-public-key --instance-id ${Instance} --instance-os-user ubuntu --ssh-public-key file://~/.ssh/id_rsa.pub --availability-zone ${Instance.AvailabilityZone}'
+
+  SessionManagerCommand:
+    Description: SSM Session Manager shell (no key, no open ports required)
+    Value: !Sub 'aws ssm start-session --target ${Instance}'
 
   EnvFileLocation:
     Description: Edit this file with your credentials, then restart the service

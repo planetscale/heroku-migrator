@@ -16,9 +16,8 @@ docker-compose and systemd.
 
 - EC2 instance (Ubuntu 24.04) with Docker and heroku-migrator running under systemd
 - EBS gp3 volume for Docker image and Bucardo working data
-- Security group (SSH and dashboard port 8080 open by default; restrict to your IP via `DashboardAccessCidr`)
-- IAM instance profile with SSM Session Manager access (no bastion host needed)
-
+- Security group: SSH (port 22) open, dashboard port 8080 **not exposed** (localhost-only)
+- IAM instance profile with SSM Session Manager access
 
 ## Parameters
 
@@ -27,10 +26,10 @@ docker-compose and systemd.
 | `ResourcePrefix` | `ps-heroku-migration` | Prefix for all AWS resource names |
 | `VpcId` | — | VPC ID where the instance will run |
 | `SubnetId` | — | Subnet with outbound internet access |
-| `DashboardAccessCidr` | `0.0.0.0/0` | CIDR for dashboard access on port 8080. Open to all by default (dashboard is password-protected). Restrict to your IP (e.g. `1.2.3.4/32`) for tighter security. |
-| `InstanceType` | `m7i-flex.2xlarge` | EC2 instance type |
-| `VolumeSize` | `100` | EBS volume in GB |
+| `InstanceType` | `m7i.2xlarge` | EC2 instance type |
+| `VolumeSize` | `100` | EBS volume in GB (gp3, 50–1000). Needs to hold the Docker image (~2 GB) and Bucardo working data. |
 | `KeyPairName` | *(empty)* | Optional SSH key pair |
+| `YourPublicIP` | *(empty)* | Your IPv4 to restrict SSH. Get it with `curl -4 icanhazip.com`. Leave empty to allow SSH from anywhere. |
 
 ### Choosing an Instance Type
 
@@ -41,8 +40,8 @@ docker-compose and systemd.
 | 200–500 GB | `m7i.4xlarge` |
 | Over 500 GB | `m7i.8xlarge` |
 
-Bucardo runs a PostgreSQL instance inside the container to manage replication state, so RAM
-matters. Watch `docker compose logs -f` for OOM signals and resize if needed.
+Bucardo runs a PostgreSQL instance inside the container, so RAM matters. Watch
+`docker compose logs -f` for OOM signals and resize if needed.
 
 ## How to Deploy
 
@@ -54,28 +53,53 @@ matters. Watch `docker compose logs -f` for OOM signals and resize if needed.
 ### Steps
 
 1. **Upload** `heroku-migrator-ec2.yaml` to CloudFormation (Console → Create Stack → Upload template)
-2. **Fill in** VPC ID, Subnet ID, and instance type. `DashboardAccessCidr` defaults to `0.0.0.0/0` — set it to your IP (`x.x.x.x/32`) if you want to restrict dashboard access.
-3. **Deploy** and wait for completion (~5 minutes). The Docker image build (~15–20 min) runs in the background after CloudFormation marks the stack complete. The migrator dashboard won't be available until the build finishes.
+2. **Fill in** VPC ID, Subnet ID, and instance type. Optionally set `YourPublicIP` to restrict SSH.
+3. **Deploy** and wait for completion (~5 minutes). The Docker image build (~15–20 min) runs in
+   the background — the dashboard won't be available until the build finishes.
 4. **Connect** to the instance via SSM Session Manager (no key needed):
    ```bash
    aws ssm start-session --target INSTANCE_ID
    ```
-   Or open the instance in the EC2 console and click **Connect → Session Manager**.
-
-5. **Set your credentials:**
+   Or open the EC2 console → select instance → **Connect → Session Manager**.
+5. **Set your credentials** on the instance:
    ```bash
    sudo vim /opt/heroku-migrator/.env
    ```
    Fill in `HEROKU_URL`, `PLANETSCALE_URL`, and `PASSWORD`, then save.
-
 6. **Start the migrator:**
    ```bash
    sudo systemctl restart heroku-migrator
    ```
-
-7. **Access the dashboard** — open `http://PUBLIC_IP:8080` in your browser (find the public IP in the EC2 console or the stack Outputs). Log in with username `admin` and the `PASSWORD` you set in `.env`.
-
+7. **Open an encrypted tunnel to the dashboard** (see below) and go to `http://localhost:8080`.
 8. **Click Start Migration** and follow the dashboard.
+
+## Accessing the Dashboard
+
+The dashboard runs on port 8080 but is **bound to localhost only** on the instance — it is not
+reachable from the internet. Access it through an encrypted tunnel so credentials and migration
+data are never transmitted in plaintext.
+
+### Option A — SSH tunnel (recommended if you have a key pair)
+
+```bash
+ssh -i /path/to/key.pem -L 8080:localhost:8080 -N ubuntu@PUBLIC_IP
+```
+
+Keep this running in a terminal, then open **http://localhost:8080** in your browser.
+
+### Option B — SSM port forwarding (no key pair needed)
+
+```bash
+aws ssm start-session \
+  --target INSTANCE_ID \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+```
+
+Keep this running in a terminal, then open **http://localhost:8080** in your browser.
+
+Both options require the tunnel to stay open while you use the dashboard. The `INSTANCE_ID`
+and the SSH tunnel command are available in the stack **Outputs** tab after deployment.
 
 ## Useful Commands (on the instance)
 
@@ -98,12 +122,6 @@ sudo systemctl stop heroku-migrator
 # Check which containers are running
 docker ps
 ```
-
-## Dashboard Access
-
-Port 8080 is open by default. Go to `http://PUBLIC_IP:8080` — no tunnel needed.
-
-To restrict access to your IP only, set `DashboardAccessCidr` to `YOUR_IP/32` when deploying, or update the security group inbound rule directly in the EC2 console after deployment.
 
 ## Tearing Down
 
