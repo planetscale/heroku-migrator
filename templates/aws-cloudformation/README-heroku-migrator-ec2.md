@@ -15,7 +15,7 @@ docker-compose and systemd.
 ## What Gets Created
 
 - EC2 instance (Ubuntu 24.04) with Docker and heroku-migrator running under systemd
-- EBS gp3 volume for Docker image and Bucardo working data
+- EBS io2 volume for Docker image and Bucardo working data
 - Security group: SSH (port 22) open, dashboard port 8080 **not exposed** (localhost-only)
 - IAM instance profile with SSM Session Manager access
 
@@ -27,7 +27,7 @@ docker-compose and systemd.
 | `VpcId` | — | VPC ID where the instance will run |
 | `SubnetId` | — | Subnet with outbound internet access |
 | `InstanceType` | `m7i.2xlarge` | EC2 instance type |
-| `VolumeSize` | `100` | EBS volume in GB (gp3, 50–1000). Needs to hold the Docker image (~2 GB) and Bucardo working data. |
+| `VolumeSize` | `200` | EBS root volume in GB (io2). Options: 200, 500, 1000, 5000. IOPS are provisioned automatically: 200 GB → 32,000 \| 500 GB → 80,000 \| 1,000 GB → 160,000 \| 5,000 GB → 256,000. |
 | `KeyPairName` | *(empty)* | Optional SSH key pair |
 | `YourPublicIP` | *(empty)* | Your IPv4 to restrict SSH. Get it with `curl -4 icanhazip.com`. Leave empty to allow SSH from anywhere. |
 
@@ -35,10 +35,10 @@ docker-compose and systemd.
 
 | Database Size | Recommended Type |
 |---|---|
-| Under 50 GB | `m7i.xlarge` |
-| 50–200 GB | `m7i.2xlarge` |
-| 200–500 GB | `m7i.4xlarge` |
-| Over 500 GB | `m7i.8xlarge` |
+| Under 100 GB | `m7i.xlarge` |
+| 100–500 GB | `m7i.2xlarge` |
+| 500–1000 GB | `m7i.4xlarge` |
+| Over 1000 GB | `m7i.8xlarge` |
 
 Bucardo runs a PostgreSQL instance inside the container, so RAM matters. Watch
 `docker compose logs -f` for OOM signals and resize if needed.
