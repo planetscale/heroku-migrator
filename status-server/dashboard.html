@@ -1180,6 +1180,7 @@
           + '<li><span class="step-num">2</span><span class="step-text">All existing data will be copied, and real-time replication will begin. Your Heroku app continues running normally.</span></li>'
           + '<li><span class="step-num">3</span><span class="step-text">When you\'re ready, you\'ll switch traffic by blocking writes to Heroku and pointing your app to PlanetScale.</span></li>'
           + '</ol>'
+          + '<div class="guide-callout guide-callout-error"><strong>Do not make schema changes during the migration.</strong> Any DDL on Heroku will break replication. Pause auto-migrations and schema deploys until the migration is complete.</div>'
           + '<div id="preflightTableCheck" style="margin-bottom:12px;"></div>'
           + '<div id="preflightPassedSection">'
           + '<div class="guide-callout">'

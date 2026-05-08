@@ -12,6 +12,8 @@ This app uses [Bucardo](https://bucardo.org/Bucardo/), an open-source PostgreSQL
 
 There are a few things to prepare before deploying the migrator.
 
+> **Important: do not make schema changes during the migration.** Bucardo discovers your tables, columns, and constraints when replication is configured and installs triggers based on that snapshot. Running `CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`, adding/removing indexes or columns, or any other DDL on Heroku **after** the migration starts will break replication and the run will need to be aborted and restarted. Pause all schema migrations on your application (including framework auto-migrations) for the entire duration of the migration -- from clicking **Start Migration** through **Complete Migration**. If you need to ship a schema change, finish or abort the migration first.
+
 ### 1. Get your Heroku database credentials
 
 You'll need your Heroku Postgres connection URL. Run this command to get it:
