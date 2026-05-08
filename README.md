@@ -32,6 +32,10 @@ Copy this value. You'll paste it as the `HEROKU_URL` when deploying the migrator
 
 Follow the [PlanetScale Postgres quickstart guide](https://planetscale.com/docs/postgres/tutorials/planetscale-postgres-quickstart) to create a database and generate a password. When creating the password, make sure you select the **Postgres** permission. Copy the Postgres connection string. This is your `PLANETSCALE_URL`.
 
+The **Postgres** permission is required for migration setup and schema copy, not
+just for runtime app access. Credentials with only table read/write permissions
+may fail during setup.
+
 ### 3. Check your Heroku Postgres extensions
 
 Bucardo replicates your data, but it doesn't install Postgres extensions. You'll need to make sure any extensions you use on Heroku are also enabled on PlanetScale **before** starting the migration.
@@ -119,6 +123,26 @@ heroku pg:psql -a your-app-name -c "SELECT tablename FROM pg_tables WHERE schema
 
 If table privileges are missing for your chosen `HEROKU_URL` user, the migration setup may work but end-to-end validation can be incomplete.
 
+### 9. Check application connection compatibility
+
+Before cutover, verify that every app process can connect with the PlanetScale
+connection string, not just `psql` or the migrator. PlanetScale Postgres
+connection strings can include libpq-style SSL parameters such as `sslmode`,
+`sslrootcert`, and `sslnegotiation`. libpq-based clients handle these directly,
+but some drivers and frameworks require driver-specific SSL configuration.
+
+For example, applications using `asyncpg` through SQLAlchemy may fail if
+libpq-style SSL query parameters are passed through unchanged. Test web, worker,
+sync, and async code paths before switching traffic.
+
+On Heroku, if `sslrootcert=system` works in one client but fails in the deployed
+app runtime with a certificate verification error, try the explicit Debian CA
+bundle path:
+
+```text
+sslrootcert=/etc/ssl/certs/ca-certificates.crt
+```
+
 ## Deploy to Heroku
 
 Click the button at the top of this page, or deploy manually:
@@ -157,6 +181,15 @@ You'll be prompted for a password. Enter the `PASSWORD` you set above. The usern
 ### Which dyno size should I use?
 
 The migrator runs PostgreSQL and Bucardo inside the dyno, so it needs more memory than a typical web app. Memory usage scales with both **data size** and **write volume**.
+
+If you use the Deploy to Heroku button, verify the actual dyno size after
+deployment. If the app is not running on the size you expect, resize it before
+starting the migration:
+
+```bash
+heroku ps -a my-migration
+heroku ps:resize web=standard-2x -a my-migration
+```
 
 - **Standard-1x (512 MB)**: Small databases with low write volume (under 1 million rows, fewer than 20 tables).
 - **Standard-2x (1 GB)**: Databases under 50 GB with moderate write volume.
@@ -201,6 +234,12 @@ When the dashboard shows your databases are in sync, you're ready to cut over. C
 REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public FROM your_heroku_user;
 ```
 
+For production apps, consider enabling Heroku maintenance mode before clicking
+**Switch Traffic**. The migrator blocks writes on the source database, but it
+does not update your application's config vars, restart dynos, or verify the app
+against PlanetScale. Maintenance mode keeps user traffic out of the handoff
+window while you update and test the app.
+
 After this, your app can still **read** from Heroku, but any **write** query will fail with a permission error. This ensures no new data is written to Heroku while you switch over.
 
 Then update your app to use PlanetScale:
@@ -208,6 +247,13 @@ Then update your app to use PlanetScale:
 ```bash
 heroku config:set DATABASE_URL="your-planetscale-connection-string" -a your-app-name
 ```
+
+> [!WARNING]
+> If your app has a Heroku Postgres add-on attached, `DATABASE_URL` may be owned
+> by the add-on attachment rather than being a normal config var. In that case,
+> `heroku config:set DATABASE_URL=...` can fail with `Cannot overwrite attachment
+> values`. Preserve or rename the old attachment, then detach the attachment that
+> owns `DATABASE_URL` before setting the PlanetScale URL.
 
 Your app restarts and begins using PlanetScale. Test it to make sure everything works.
 
@@ -309,6 +355,8 @@ Use the connection URL for your primary database (`DATABASE_URL`), not a followe
 We offer **complimentary hands-on migration assistance** for Heroku migrations on a case-by-case basis. [Reach out to learn more](https://planetscale.com/contact).
 
 If you prefer to run Bucardo manually instead of using this tool, see the [migration scripts on GitHub](https://github.com/planetscale/migration-scripts).
+
+For troubleshooting notes from real Heroku cutovers, see [Heroku migration field notes](docs/heroku-migration-field-notes.md).
 
 ## Local development
 
