@@ -187,6 +187,9 @@ RCEOF
     --db-port "$PGPORT" \
     --verbose 2>/dev/null || true
 
+  echo "Configuring Bucardo verbose logging..."
+  bucardo set log_level=verbose
+
   echo "Starting Bucardo daemon..."
   bucardo start || bucardo restart
 fi
