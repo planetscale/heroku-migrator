@@ -292,4 +292,3 @@ SELECT count(*) FROM pg_namespace WHERE nspname = 'bucardo';     -- expect 0
 ```
 
 Always use a **fresh PlanetScale branch/database** for the next attempt after cleanup.
-:w
