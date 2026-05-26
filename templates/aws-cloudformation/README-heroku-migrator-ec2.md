@@ -27,7 +27,7 @@ docker-compose and systemd.
 | `VpcId` | — | VPC ID where the instance will run |
 | `SubnetId` | — | Subnet with outbound internet access |
 | `InstanceType` | `m7i.2xlarge` | EC2 instance type |
-| `VolumeSize` | `200` | EBS root volume in GB (io2). Options: 200, 500, 1000, 5000. IOPS are provisioned automatically: 200 GB → 32,000 \| 500 GB → 80,000 \| 1,000 GB → 160,000 \| 5,000 GB → 256,000. |
+| `VolumeSize` | `200` | EBS root volume in GB (io2). Options: 200, 500. IOPS provisioned automatically: 200 GB → 32,000 \| 500 GB → 50,000. |
 | `KeyPairName` | *(empty)* | Optional SSH key pair |
 | `YourPublicIP` | *(empty)* | Your IPv4 to restrict SSH. Get it with `curl -4 icanhazip.com`. Leave empty to allow SSH from anywhere. |
 

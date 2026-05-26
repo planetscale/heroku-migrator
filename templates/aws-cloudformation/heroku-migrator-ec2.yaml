@@ -78,10 +78,10 @@ Parameters:
   VolumeSize:
     Type: Number
     Default: 200
-    AllowedValues: [200, 500, 1000, 5000]
+    AllowedValues: [200, 500]
     Description: >-
       EBS root volume size (io2). IOPS are provisioned automatically:
-      200 GB → 32,000 | 500 GB → 80,000 | 1,000 GB → 160,000 | 5,000 GB → 256,000.
+      200 GB : 32,000 | 500 GB : 50,000.
 
   KeyPairName:
     Type: String
@@ -101,10 +101,8 @@ Parameters:
 
 Mappings:
   VolumeIops:
-    "200":  { Iops: 32000 }
-    "500":  { Iops: 80000 }
-    "1000": { Iops: 160000 }
-    "5000": { Iops: 256000 }
+    "200": { Iops: 32000 }
+    "500": { Iops: 50000 }
 
   # Source: https://ip-ranges.amazonaws.com/ip-ranges.json (service: EC2_INSTANCE_CONNECT)
   EC2InstanceConnectCIDRs:
@@ -305,6 +303,18 @@ Resources:
             /opt/heroku-migrator/state \
             /opt/heroku-migrator/logs \
             /opt/heroku-migrator/run
+
+          # ---------------------------------------------------------------------------
+          # Kernel TCP buffer tuning for Bucardo replication over long-haul links.
+          # Written under /etc/sysctl.d/ for persistence across reboots.
+          # ---------------------------------------------------------------------------
+          cat > /etc/sysctl.d/99-heroku-migrator.conf <<'SYSCTL'
+          net.core.rmem_max=134217728
+          net.core.wmem_max=134217728
+          net.ipv4.tcp_rmem=4096 87380 134217728
+          net.ipv4.tcp_wmem=4096 65536 134217728
+          SYSCTL
+          sysctl --system
 
           # ---------------------------------------------------------------------------
           # Clone the heroku-migrator source (needed to build the Docker image)
