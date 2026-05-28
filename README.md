@@ -86,7 +86,7 @@ What this means for your Heroku database:
 - **Large databases** (tens of millions to billions of rows): The initial data copy puts additional read load on your Heroku database. The triggers add a small amount of write overhead. For most workloads this is fine, but if your database is already under heavy load, consider:
   - **Upgrade your Heroku Postgres plan temporarily.** A larger plan gives your database more headroom during the migration. You can downgrade or remove it once you're done.
   - **Run the migration during off-peak hours.** Start the initial copy when your app has less traffic.
-  - **Use the Pause button (with caveats).** The migration dashboard has a Pause Sync button that stops data transfer to PlanetScale. However, pausing does **not** remove Bucardo's triggers from your Heroku database. Every write still fires the trigger and records changes into tracking tables, so the per-write overhead remains. Pausing reduces the migrator's read load on Heroku but does not eliminate the write-side cost. If you need to fully remove the trigger overhead, use the **Abort Migration** button in the dashboard.
+  - **Use the Pause button -- but be aware of the phase.** Once Bucardo finishes the initial copy and enters delta replication (the dashboard shows "Your databases are in sync"), the **Pause Sync** button stops data transfer to PlanetScale while changes continue to be queued in Bucardo's `bucardo_delta` tracking tables. Resuming catches up cleanly. Be careful pausing while the initial copy is still running ("Copying data to PlanetScale") -- Bucardo cannot resume a partial `COPY`, so resuming will restart the initial copy from scratch. In either phase, pausing reduces the migrator's read load on Heroku but does not remove the trigger overhead on writes. To fully remove that overhead, use **Abort Migration**.
 
 ### 7. Heroku's 24-hour restart limit
 
@@ -226,7 +226,12 @@ All existing rows are copied from Heroku to PlanetScale (the "initial copy"). On
 
 Your Heroku app continues running normally throughout this entire process. You don't need to do anything until you're ready to switch.
 
-For large databases, the initial copy can take hours. The dashboard shows progress and you can safely close the browser and come back later. If you need to reduce load on your Heroku database, use the **Pause Sync** button. This stops data transfer to PlanetScale, but Bucardo's triggers remain active on Heroku -- every write still has trigger overhead. Changes are tracked while paused and will catch up when you resume. If your database is severely impacted and you need to fully remove the triggers, use the **Abort Migration** button instead.
+For large databases, the initial copy can take hours. The dashboard shows progress and you can safely close the browser and come back later. The **Pause Sync** button behaves differently depending on the Bucardo phase:
+
+- **While the initial copy is running** (dashboard title "Copying data to PlanetScale"): Bucardo cannot resume a partial `COPY`. Pausing and then resuming will restart the initial copy from scratch.
+- **Once you reach delta replication** (dashboard title "Your databases are in sync"): pausing is safe. Changes are queued in Bucardo's `bucardo_delta` tables while paused and apply on Resume.
+
+In either case, Bucardo's triggers stay on your Heroku database while paused, so writes still carry trigger overhead. Use **Abort Migration** if you need to remove the triggers entirely.
 
 ### Step 3: Switch traffic
 
@@ -340,7 +345,7 @@ This approach is useful for migrations because:
 - **Works with any PostgreSQL host.** Bucardo doesn't need special configuration on the source or target. It just needs standard PostgreSQL connections.
 - **Handles large databases.** The initial copy runs in the background and ongoing replication handles the delta.
 
-The trade-off is that triggers add a small amount of overhead to every write on your source database. For most workloads this is negligible, but for write-heavy databases under heavy load, you'll want to monitor performance. Note that pausing replication stops data transfer but does **not** remove the triggers -- every write still has trigger overhead while paused. If you need to fully stop the impact on your source database, use the **Abort Migration** button in the dashboard to remove all triggers.
+The trade-off is that triggers add a small amount of overhead to every write on your source database. For most workloads this is negligible, but for write-heavy databases under heavy load, you'll want to monitor performance. Note that pausing replication stops data transfer but does **not** remove the triggers -- every write still has trigger overhead while paused. Pausing is safe once Bucardo finishes the initial copy and enters delta replication; if you pause earlier, Bucardo will restart the initial copy from scratch when you resume. If you need to fully stop the impact on your source database, use the **Abort Migration** button in the dashboard to remove all triggers.
 
 ## Can I connect this to a Heroku follower/replica?
 
