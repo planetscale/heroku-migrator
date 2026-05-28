@@ -112,7 +112,13 @@ fi
 # Give Bucardo enough time to validate all tables across both databases.
 # The default 30s timeout is too short for databases with many tables, since
 # each table is inspected on both source and target over remote connections.
-bucardo set reload_config_timeout=180 log_level=verbose
+bucardo set reload_config_timeout=180 log_level=verbose rebuild_index=1
+
+# Keep remote database connections alive across infrastructure with aggressive
+# idle TCP timeouts, such as EC2 network paths.
+bucardo set tcp_keepalives_idle=60
+bucardo set tcp_keepalives_interval=10
+bucardo set tcp_keepalives_count=6
 
 # Reload Bucardo, which starts the sync we just added.
 bucardo reload
