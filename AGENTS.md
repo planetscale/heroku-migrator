@@ -170,6 +170,16 @@ Dashboard shows cutover is blocked but everything else looks healthy (syncs comp
 
 If the migration entered the `error` phase during setup, click **Retry Migration** in the dashboard. This resets to the `waiting` phase so the user can fix the issue and start again. If the dashboard is inaccessible, the user needs to destroy and recreate the migration app.
 
+## Pause/Resume safety
+
+The dashboard exposes **Pause Sync** in both the `copying` and `replicating` phases. Pause behaves very differently in each:
+
+- **Phase `copying` (initial copy in progress, dashboard title "Copying data to PlanetScale"):** Warn users before they pause. Bucardo's `onetimecopy` cannot be resumed mid-table -- `bucardo pause` stops the in-flight `COPY` and `bucardo resume` restarts the initial copy from the beginning. All progress on the current table (and subsequent tables in the run) is lost. If a user needs to reduce load during the initial copy, the safer options are: wait for the copy to finish, resize to a larger Heroku Postgres plan, or **Abort Migration** and restart later.
+- **Phase `replicating` with `bucardo.initial_copy_phase === "finished"` (dashboard title "Your databases are in sync"):** Pause is safe. Writes continue to be tracked in `bucardo_delta` and drain on Resume. The longer the pause, the larger the queue.
+- Triggers remain active in both cases -- pause does not reduce write-side trigger overhead. Only **Abort Migration** removes triggers.
+
+When triaging "my database is overloaded" reports, check `bucardo.initial_copy_phase` in `/status` before recommending Pause.
+
 ## Retrieving logs
 
 ### Dashboard API

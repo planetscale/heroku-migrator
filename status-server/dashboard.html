@@ -805,7 +805,7 @@
       }
       if (phase === 'copying') {
         if (state === 'paused') {
-          return { tone: 'next-yellow', main: 'Click Resume Sync to continue initial copy.', sub: 'Changes are queued while paused and will catch up after resume.' };
+          return { tone: 'next-yellow', main: 'Initial copy is paused -- Resume Sync will restart it from the beginning.', sub: 'Bucardo cannot resume a partial copy. Use Abort Migration if you do not want the copy to restart.' };
         }
         return { tone: 'next-blue', main: 'No action needed. Initial copy is in progress.', sub: 'Monitor logs and estimated progress; this can take minutes to hours.' };
       }
@@ -1226,7 +1226,7 @@
           + '<li><span class="step-num">2</span><span class="step-text">Every row in every table will be copied to PlanetScale.</span></li>'
           + '<li><span class="step-num">3</span><span class="step-text">New changes to Heroku will be tracked and replicated automatically.</span></li>'
           + '</ol>'
-          + '<div class="guide-callout guide-callout-info">The data copy will put read load on your Heroku database. For large databases, consider running this during off-peak hours. You can pause the copy at any time from the dashboard.</div>'
+          + '<div class="guide-callout guide-callout-info">The data copy will put read load on your Heroku database. For large databases, consider running this during off-peak hours. You can pause sync once the initial copy finishes and replication enters delta mode; pausing during the initial copy itself will cause Bucardo to restart the copy from scratch when you resume.</div>'
           + '<div class="guide-actions"><button class="btn btn-primary" onclick="startCopy(this)">Start Data Copy</button></div>';
         return;
 
@@ -1236,9 +1236,8 @@
         if (isPaused) {
           setGuideIndicator('none');
           title.textContent = 'Data copy paused';
-          body.innerHTML = '<div class="guide-callout">The data copy is paused. Changes to your Heroku database are still being tracked but won\'t be copied to PlanetScale until you resume. No data will be lost.</div>'
-            + '<div class="guide-callout guide-callout-info"><strong>Note:</strong> Bucardo\'s triggers are still active on your Heroku database. Every write still has trigger overhead. Pausing stops data transfer to PlanetScale but does not reduce the write-side impact on Heroku.</div>'
-            + '<p>When you\'re ready, click Resume to continue copying. If you need to fully remove trigger overhead, click Abort Migration.</p>'
+          body.innerHTML = '<div class="guide-callout guide-callout-error"><strong>Initial copy is paused.</strong> Bucardo cannot resume a partial copy -- clicking Resume Sync will restart the initial copy from the beginning. Changes to your Heroku database continue to be tracked, but the bulk row copy will start over.</div>'
+            + '<p>If you only meant to reduce load on Heroku, Abort Migration removes Bucardo\'s triggers entirely. Otherwise click Resume Sync to restart the initial copy.</p>'
             + '<div class="guide-actions"><button class="btn btn-primary btn-sm" onclick="resumeSync(this)">Resume Sync</button> <button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button></div>';
         } else {
           setGuideIndicator('spinner');
@@ -1246,6 +1245,7 @@
           body.innerHTML = '<p>All existing rows are being copied from Heroku to PlanetScale. Any new changes to your Heroku database are being tracked and will be replicated automatically.</p>'
             + '<p>Your Heroku app is running normally. For large databases this can take several hours.</p>'
             + '<div class="guide-callout guide-callout-info">You can safely close this page and come back later. The copy will continue in the background.</div>'
+            + '<div class="guide-callout guide-callout-info"><strong>Heads up about Pause Sync:</strong> Bucardo cannot resume a partial initial copy. If you pause now, clicking Resume Sync will restart the copy from the beginning. Pausing becomes safe once the dashboard shows "Your databases are in sync".</div>'
             + '<div class="guide-actions"><button class="btn btn-secondary btn-sm" onclick="pauseSync(this)">Pause Sync</button> <button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button></div>';
         }
 
