@@ -749,6 +749,7 @@
     let preflightCheckRan = false;
     let preflightBadTables = [];
     let preflightGeneratedTables = [];
+    let preflightPgPartman = null;
 
     // ---- Phase helpers ----
     function phaseBadgeClass(phase) {
@@ -894,6 +895,20 @@
           + '</div>';
       }
 
+      if (preflightPgPartman && preflightPgPartman.detected) {
+        const parents = preflightPgPartman.parent_tables || [];
+        const parentItems = parents.map(t => '<li>' + escapeHtml(t) + '</li>').join('');
+        const recreationSql = preflightPgPartman.recreation_sql || '';
+        html += '<div class="guide-callout guide-callout-info">'
+          + '<strong>pg_partman detected</strong>'
+          + '<p style="margin:8px 0 4px;">Pause pg_partman maintenance jobs before migration. The migrator excludes pg_partman internal schemas by default and will replicate leaf partition tables in included app schemas.</p>'
+          + (parents.length > 0 ? '<ul class="preflight-table-list">' + parentItems + '</ul>' : '')
+          + '<p style="margin:8px 0 4px;">After schema copy finishes and pg_partman is installed on PlanetScale, apply this generated SQL on PlanetScale to recreate the partition sets. Do not apply it automatically from the migrator.</p>'
+          + '<div class="guide-callout" style="margin:8px 0;">' + escapeHtml(preflightPgPartman.warning || 'pg_partman dump_partitioned_table_definition supports single-level partition sets only.') + '</div>'
+          + (recreationSql ? '<pre class="guide-code" id="pgPartmanSqlBlock">' + escapeHtml(recreationSql) + '</pre><button class="btn btn-secondary btn-sm" onclick="copyPgPartmanSql()">Copy pg_partman SQL</button>' : '<p>No pg_partman recreation SQL was returned.</p>')
+          + '</div>';
+      }
+
       if (preflightBadTables.length > 0) {
         html += '<button class="btn btn-secondary btn-sm" style="margin-top:8px;" onclick="runPreflightChecks()">Re-check Tables</button>';
         if (passedSection) passedSection.style.display = 'none';
@@ -914,6 +929,7 @@
           preflightCheckRan = true;
           preflightBadTables = data.tables_without_pk_or_unique || [];
           preflightGeneratedTables = data.tables_with_generated_columns || [];
+          preflightPgPartman = data.pg_partman || null;
           renderCachedPreflightResult();
           if (data.all_tables_valid) {
             preflightChecks.tablesReady = true;
@@ -1083,6 +1099,16 @@
       }).catch((err) => {
         console.error('Diagnostics export failed:', err);
         showActionResult('error', 'Diagnostics export failed', 'Could not export diagnostics. Please try again.');
+      });
+    }
+
+    function copyPgPartmanSql() {
+      const block = document.getElementById('pgPartmanSqlBlock');
+      if (!block) return;
+      navigator.clipboard.writeText(block.textContent || '').then(() => {
+        showActionResult('success', 'pg_partman SQL copied', 'The generated pg_partman SQL was copied to your clipboard.');
+      }).catch(() => {
+        showActionResult('error', 'Copy failed', 'Could not copy the generated pg_partman SQL.');
       });
     }
 
