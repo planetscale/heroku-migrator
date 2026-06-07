@@ -34,15 +34,15 @@ Every extension listed must be enabled on the PlanetScale database before starti
 Every table must have a primary key or unique index. Bucardo cannot track rows without one.
 
 ```sql
-SELECT c.relname
+SELECT n.nspname || '.' || c.relname
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = 'public' AND c.relkind = 'r'
+WHERE n.nspname IN ('public') AND c.relkind = 'r'
   AND NOT EXISTS (
     SELECT 1 FROM pg_index i
     WHERE i.indrelid = c.oid AND (i.indisprimary OR i.indisunique)
   )
-ORDER BY c.relname;
+ORDER BY n.nspname, c.relname;
 ```
 
 If any tables are returned, the user must add a primary key or unique index to each one on their Heroku database before starting. Example fix: `ALTER TABLE table_name ADD PRIMARY KEY (id);`
@@ -100,7 +100,45 @@ Match the PlanetScale database region accordingly (e.g., `us-east` for Heroku `u
 
 PostgreSQL `GENERATED ALWAYS AS ... STORED` columns are handled automatically by the migrator -- it registers a `customcols` override against the PlanetScale side that omits each generated column from `COPY`, and PlanetScale recomputes the value on insert. No user action required. The dashboard's preflight section lists any affected tables for visibility.
 
-### 8. Fresh PlanetScale target
+### 8. pg_partman
+
+The migrator supports pg_partman by filtering migration scope by schema while
+still using Bucardo's `add all tables` flow. Defaults:
+
+- `MIGRATION_SCHEMAS=public`
+- `MIGRATION_EXCLUDE_SCHEMAS=heroku_ext,partman,pg_partman,bucardo,pg_catalog,information_schema`
+
+Example deployment override:
+
+```bash
+heroku config:set \
+  MIGRATION_SCHEMAS=public \
+  MIGRATION_EXCLUDE_SCHEMAS=heroku_ext,partman,pg_partman \
+  -a <migration-app>
+```
+
+Before migration, tell the operator to pause pg_partman maintenance jobs on
+Heroku and install pg_partman on PlanetScale. The dashboard detects
+`partman.part_config` and `partman.dump_partitioned_table_definition(parent_table)`.
+When detected, it shows managed parent tables and generated SQL from:
+
+```sql
+SELECT partman.dump_partitioned_table_definition(parent_table)
+FROM partman.part_config
+ORDER BY parent_table;
+```
+
+The operator must apply this SQL manually on PlanetScale after schema copy and
+pg_partman extension installation. Do not auto-apply it. The dump function
+supports single-level partition sets only.
+
+Leaf partition tables in included application schemas are replicated. pg_partman
+config/internal schemas are excluded. If a user stores pg_partman config tables
+inside an included application schema, schema exclusion will not filter those
+tables; they should move config tables to the extension schema or exclude that
+schema from the migration.
+
+### 9. Fresh PlanetScale target
 
 Always use a clean PlanetScale database or branch for each migration attempt. Retrying against a target that has leftover tables/data from a failed run will cause errors.
 
@@ -108,7 +146,7 @@ Always use a clean PlanetScale database or branch for each migration attempt. Re
 
 ### "Could not find TABLE inside public schema on database planetscale"
 
-The schema copy (`pg_dump | psql`) failed silently for one or more tables. The table exists on Heroku but wasn't created on PlanetScale. Check the **Setup Log** in the dashboard (or `GET /logs` → `setup` field) for the actual `psql` error. Most common cause: a missing extension on PlanetScale that the table depends on.
+The schema copy (`pg_dump | psql`) failed silently for one or more tables. The table exists on Heroku but wasn't created on PlanetScale. Check the **Setup Log** in the dashboard (or `GET /logs` → `setup` field) for the actual `psql` error. Most common cause: a missing extension on PlanetScale that the table depends on. For non-public schemas, check that `MIGRATION_SCHEMAS` includes the app schema and that it is not removed by `MIGRATION_EXCLUDE_SCHEMAS`.
 
 ### "Generated columns cannot be used in COPY"
 
@@ -119,7 +157,7 @@ DETAIL: Generated columns cannot be used in COPY.
 
 Bucardo 5.6 does not filter out PostgreSQL `GENERATED ALWAYS AS ... STORED` columns when building the `COPY` it issues against the target. Any sync containing a table with a generated column will fail with this error during the initial copy and during ongoing replication.
 
-**Current migrator (with auto-fix):** [scripts/mk-bucardo-repl.sh](scripts/mk-bucardo-repl.sh) detects generated columns and registers `bucardo add customcols ... db=planetscale` overrides automatically. The setup log will show `Excluding generated columns on public.<table> via customcols`. The dashboard's preflight section also lists affected tables as an informational note. No user action required.
+**Current migrator (with auto-fix):** [scripts/mk-bucardo-repl.sh](scripts/mk-bucardo-repl.sh) detects generated columns in included migration schemas and registers `bucardo add customcols ... db=planetscale` overrides automatically. The setup log will show `Excluding generated columns on <schema>.<table> via customcols`. The dashboard's preflight section also lists affected tables as an informational note. No user action required.
 
 **Older migrator (manual workaround):** If a user is on a version of the migrator without the auto-fix and they hit this error, they can apply the workaround inside the migration dyno (`heroku ps:exec -a <migration-app>`):
 
@@ -130,7 +168,7 @@ Bucardo 5.6 does not filter out PostgreSQL `GENERATED ALWAYS AS ... STORED` colu
    FROM pg_attribute a
    JOIN pg_class c ON c.oid = a.attrelid
    JOIN pg_namespace n ON n.oid = c.relnamespace
-   WHERE n.nspname = 'public' AND c.relkind = 'r'
+   WHERE n.nspname IN ('public') AND c.relkind = 'r'
      AND a.attnum > 0 AND NOT a.attisdropped
      AND a.attgenerated <> ''
    ORDER BY n.nspname, c.relname, a.attnum;
@@ -139,7 +177,7 @@ Bucardo 5.6 does not filter out PostgreSQL `GENERATED ALWAYS AS ... STORED` colu
 2. For each affected table, register a customcols override that omits the generated column(s) (the PlanetScale target already has the generation expression and will recompute the value on insert):
 
    ```bash
-   bucardo add customcols public.<table> "SELECT id, col_a, col_b, ..." db=planetscale
+   bucardo add customcols <schema>.<table> "SELECT id, col_a, col_b, ..." db=planetscale
    ```
 
 3. Abort the migration in the dashboard, recreate the PlanetScale target as a fresh database/branch, and start the migration again.
@@ -233,11 +271,11 @@ Run these against the Heroku source database to help diagnose issues:
 SELECT extname, extversion FROM pg_extension WHERE extname != 'plpgsql' ORDER BY extname;
 
 -- Tables without primary key or unique index
-SELECT c.relname FROM pg_class c
+SELECT n.nspname || '.' || c.relname FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = 'public' AND c.relkind = 'r'
+WHERE n.nspname IN ('public') AND c.relkind = 'r'
   AND NOT EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND (i.indisprimary OR i.indisunique))
-ORDER BY c.relname;
+ORDER BY n.nspname, c.relname;
 
 -- Table row counts (estimated, fast)
 SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC;
@@ -281,12 +319,12 @@ DO $$
 DECLARE r RECORD;
 BEGIN
   FOR r IN
-    SELECT tgname, relname FROM pg_trigger t
+    SELECT tgname, n.nspname, c.relname FROM pg_trigger t
     JOIN pg_class c ON c.oid = t.tgrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE tgname LIKE 'bucardo_%' AND n.nspname = 'public'
+    WHERE tgname LIKE 'bucardo_%' AND n.nspname <> 'bucardo'
   LOOP
-    EXECUTE format('DROP TRIGGER %I ON %I', r.tgname, r.relname);
+    EXECUTE format('DROP TRIGGER %I ON %I.%I', r.tgname, r.nspname, r.relname);
   END LOOP;
 END $$;
 

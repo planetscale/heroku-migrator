@@ -35,6 +35,9 @@ PLANETSCALE_URL = ENV["PLANETSCALE_URL"]
 
 PORT = (ENV["PORT"] || 8080).to_i
 
+DEFAULT_MIGRATION_SCHEMAS = "public"
+DEFAULT_MIGRATION_EXCLUDE_SCHEMAS = "heroku_ext,partman,pg_partman,bucardo,pg_catalog,information_schema"
+
 # ---------------------------------------------------------------------------
 # Slack Notifications (enabled by default, disable with DISABLE_NOTIFICATIONS=true)
 # ---------------------------------------------------------------------------
@@ -94,6 +97,44 @@ def filter_harmless_pg_warnings(output)
   output.lines.reject { |line|
     line =~ /\AWARNING:\s+no privileges (?:could be revoked|were granted) for/
   }.join
+end
+
+def parse_schema_list(value)
+  value.to_s.split(",").map(&:strip).reject(&:empty?).uniq
+end
+
+def migration_requested_schemas
+  parse_schema_list(ENV.fetch("MIGRATION_SCHEMAS", DEFAULT_MIGRATION_SCHEMAS))
+end
+
+def migration_excluded_schemas
+  parse_schema_list(ENV.fetch("MIGRATION_EXCLUDE_SCHEMAS", DEFAULT_MIGRATION_EXCLUDE_SCHEMAS))
+end
+
+def migration_schema_names
+  migration_requested_schemas - migration_excluded_schemas
+end
+
+def sql_quote(value)
+  "'#{value.to_s.gsub("'", "''")}'"
+end
+
+def sql_identifier(value)
+  %("#{value.to_s.gsub('"', '""')}")
+end
+
+def migration_schema_sql_list
+  migration_schema_names.map { |schema| sql_quote(schema) }.join(", ")
+end
+
+def migration_schema_identifier_list
+  migration_schema_names.map { |schema| sql_identifier(schema) }.join(", ")
+end
+
+def migration_schema_filter_sql(alias_name = "n")
+  schemas = migration_schema_sql_list
+  return "false" if schemas.empty?
+  "#{alias_name}.nspname IN (#{schemas})"
 end
 
 # Phase transition tracking for milestone notifications
@@ -284,36 +325,38 @@ rescue StandardError
   nil
 end
 
-def normalize_table_name(value)
+def normalize_table_name(value, default_schema = nil)
   return nil if value.nil?
   table = value.to_s.strip
-  table = table.gsub(/\A"+|"+\z/, "")
-  table = table.gsub(/\Apublic\./i, "")
+  table = table.gsub('"', "")
+  table = "#{default_schema}.#{table}" if default_schema && !table.include?(".")
   table.empty? ? nil : table
 end
 
-def list_public_tables
+def list_migration_tables
   return [] unless HEROKU_URL
-  output = `psql "#{HEROKU_URL}" -A -t -c "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename;" 2>/dev/null`.strip
+  schema_filter = migration_schema_filter_sql
+  output = `psql "#{HEROKU_URL}" -A -t -c "SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE #{schema_filter} AND c.relkind = 'r' ORDER BY n.nspname, c.relname;" 2>/dev/null`.strip
   return [] if output.empty?
   output.split("\n").map { |t| normalize_table_name(t) }.compact.uniq
 rescue StandardError
   []
 end
 
-# Returns public tables that have no primary key and no unique index.
+# Returns migrated tables that have no primary key and no unique index.
 # Bucardo needs at least one to reliably identify rows during replication.
 def check_tables_without_pk_or_unique
   return [] unless HEROKU_URL
 
-  query = "SELECT c.relname FROM pg_class c " \
+  schema_filter = migration_schema_filter_sql
+  query = "SELECT n.nspname || '.' || c.relname FROM pg_class c " \
           "JOIN pg_namespace n ON n.oid = c.relnamespace " \
-          "WHERE n.nspname = 'public' AND c.relkind = 'r' " \
+          "WHERE #{schema_filter} AND c.relkind = 'r' " \
           "AND NOT EXISTS (" \
           "  SELECT 1 FROM pg_index i " \
           "  WHERE i.indrelid = c.oid " \
           "  AND (i.indisprimary OR i.indisunique)" \
-          ") ORDER BY c.relname;"
+          ") ORDER BY n.nspname, c.relname;"
   output = `psql "#{HEROKU_URL}" -A -t -c "#{query}" 2>/dev/null`.strip
   return [] if output.empty?
   output.split("\n").map { |t| normalize_table_name(t) }.compact.uniq
@@ -321,21 +364,22 @@ rescue StandardError
   []
 end
 
-# Returns public tables that contain at least one generated column, along with
+# Returns migrated tables that contain at least one generated column, along with
 # the names of those columns. Bucardo 5.6 cannot include generated columns in
 # COPY, so the migrator's setup script registers customcols overrides for them
 # automatically. This check is informational only -- it does NOT block start.
 def check_tables_with_generated_columns
   return [] unless HEROKU_URL
 
-  query = "SELECT c.relname, a.attname " \
+  schema_filter = migration_schema_filter_sql
+  query = "SELECT n.nspname || '.' || c.relname, a.attname " \
           "FROM pg_attribute a " \
           "JOIN pg_class c ON c.oid = a.attrelid " \
           "JOIN pg_namespace n ON n.oid = c.relnamespace " \
-          "WHERE n.nspname = 'public' AND c.relkind = 'r' " \
+          "WHERE #{schema_filter} AND c.relkind = 'r' " \
           "  AND a.attnum > 0 AND NOT a.attisdropped " \
           "  AND a.attgenerated <> '' " \
-          "ORDER BY c.relname, a.attnum;"
+          "ORDER BY n.nspname, c.relname, a.attnum;"
   output = `psql "#{HEROKU_URL}" -A -t -F"|" -c "#{query}" 2>/dev/null`.strip
   return [] if output.empty?
 
@@ -354,12 +398,44 @@ rescue StandardError
   []
 end
 
+def check_pg_partman
+  result = {
+    "detected" => false,
+    "parent_tables" => [],
+    "recreation_sql" => "",
+    "warning" => "pg_partman dump_partitioned_table_definition supports single-level partition sets only.",
+  }
+  return result unless HEROKU_URL
+
+  detected_query = "SELECT EXISTS (" \
+                   "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace " \
+                   "WHERE n.nspname = 'partman' AND c.relname = 'part_config'" \
+                   ") AND EXISTS (" \
+                   "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " \
+                   "WHERE n.nspname = 'partman' AND p.proname = 'dump_partitioned_table_definition'" \
+                   ");"
+  detected = `psql "#{HEROKU_URL}" -A -t -c "#{detected_query}" 2>/dev/null`.strip
+  return result unless %w[t true 1].include?(detected.downcase)
+
+  parents = `psql "#{HEROKU_URL}" -A -t -c "SELECT parent_table FROM partman.part_config ORDER BY parent_table;" 2>/dev/null`.strip
+  sql = `psql "#{HEROKU_URL}" -A -t -c "SELECT partman.dump_partitioned_table_definition(parent_table) FROM partman.part_config ORDER BY parent_table;" 2>/dev/null`.strip
+
+  result.merge(
+    "detected" => true,
+    "parent_tables" => parents.empty? ? [] : parents.split("\n").map(&:strip).reject(&:empty?),
+    "recreation_sql" => sql,
+  )
+rescue StandardError
+  result
+end
+
 def capture_table_size_estimates
   return nil unless HEROKU_URL
 
-  query = "SELECT c.relname, pg_total_relation_size(c.oid)::bigint FROM pg_class c " \
+  schema_filter = migration_schema_filter_sql
+  query = "SELECT n.nspname || '.' || c.relname, pg_total_relation_size(c.oid)::bigint FROM pg_class c " \
           "JOIN pg_namespace n ON n.oid = c.relnamespace " \
-          "WHERE n.nspname = 'public' AND c.relkind = 'r' ORDER BY c.relname;"
+          "WHERE #{schema_filter} AND c.relkind = 'r' ORDER BY n.nspname, c.relname;"
   output = `psql "#{HEROKU_URL}" -A -t -c "#{query}" 2>/dev/null`.strip
   return nil if output.empty?
 
@@ -388,9 +464,10 @@ end
 
 def get_table_size_estimates(db_url)
   return {} unless db_url
-  query = "SELECT c.relname, pg_total_relation_size(c.oid)::bigint FROM pg_class c " \
+  schema_filter = migration_schema_filter_sql
+  query = "SELECT n.nspname || '.' || c.relname, pg_total_relation_size(c.oid)::bigint FROM pg_class c " \
           "JOIN pg_namespace n ON n.oid = c.relnamespace " \
-          "WHERE n.nspname = 'public' AND c.relkind = 'r' ORDER BY c.relname;"
+          "WHERE #{schema_filter} AND c.relkind = 'r' ORDER BY n.nspname, c.relname;"
   output = `psql "#{db_url}" -A -t -c "#{query}" 2>/dev/null`.strip
   return {} if output.empty?
 
@@ -422,7 +499,13 @@ def extract_tables_from_text(text, patterns, known_tables)
       table_raw = match.is_a?(Array) ? match[0] : match
       table = normalize_table_name(table_raw)
       next unless table
-      next if known_tables.any? && !known_tables.include?(table)
+      if known_tables.any? && !known_tables.include?(table)
+        if !table.include?(".")
+          suffix_matches = known_tables.select { |known| known.end_with?(".#{table}") }
+          table = suffix_matches.first if suffix_matches.length == 1
+        end
+        next unless known_tables.include?(table)
+      end
       found << table
     end
   end
@@ -514,7 +597,7 @@ def build_progress_signals(phase:, bucardo_status:, readiness:)
   table_sizes = state["table_sizes"].is_a?(Hash) ? state["table_sizes"] : {}
   known_tables = table_sizes.keys
   if known_tables.empty?
-    known_tables = list_public_tables
+    known_tables = list_migration_tables
     state["table_sizes"] ||= {}
     known_tables.each { |t| state["table_sizes"][t] ||= 0 }
   end
@@ -796,9 +879,15 @@ server.mount_proc "/preflight-checks" do |req, res|
   tables = check_tables_without_pk_or_unique
   generated = check_tables_with_generated_columns
   res.body = JSON.generate({
+    migration_scope: {
+      included_schemas: migration_schema_names,
+      requested_schemas: migration_requested_schemas,
+      excluded_schemas: migration_excluded_schemas,
+    },
     tables_without_pk_or_unique: tables,
     all_tables_valid: tables.empty?,
     tables_with_generated_columns: generated,
+    pg_partman: check_pg_partman,
   })
 end
 
@@ -1240,7 +1329,14 @@ server.mount_proc "/switch-traffic" do |req, res|
     next
   end
 
-  cmd = "psql \"#{HEROKU_URL}\" -c \"REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public FROM #{username};\""
+  schemas = migration_schema_identifier_list
+  if schemas.empty?
+    res.status = 500
+    res.body = JSON.generate({ error: "No migration schemas configured" })
+    next
+  end
+
+  cmd = "psql \"#{HEROKU_URL}\" -c \"REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA #{schemas} FROM #{username};\""
   output = `#{cmd} 2>&1`
   success = $?.success?
 
@@ -1281,7 +1377,14 @@ server.mount_proc "/revert-switch" do |req, res|
     next
   end
 
-  cmd = "psql \"#{HEROKU_URL}\" -c \"GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO #{username};\""
+  schemas = migration_schema_identifier_list
+  if schemas.empty?
+    res.status = 500
+    res.body = JSON.generate({ error: "No migration schemas configured" })
+    next
+  end
+
+  cmd = "psql \"#{HEROKU_URL}\" -c \"GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA #{schemas} TO #{username};\""
   output = `#{cmd} 2>&1`
   success = $?.success?
 
