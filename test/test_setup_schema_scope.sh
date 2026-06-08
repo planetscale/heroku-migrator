@@ -17,7 +17,10 @@ mkdir -p "$FAKE_BIN_DIR"
 cat > "$FAKE_BIN_DIR/pg_dump" <<'SH'
 #!/bin/sh
 printf "pg_dump %s\n" "$*" >> "$COMMAND_LOG"
+echo "CREATE SCHEMA public;"
 echo "CREATE TABLE public.accounts (id bigint PRIMARY KEY);"
+echo "CREATE SCHEMA analytics;"
+echo "CREATE TABLE analytics.events (id bigint PRIMARY KEY);"
 SH
 chmod +x "$FAKE_BIN_DIR/pg_dump"
 
@@ -42,6 +45,12 @@ case "$query" in
     echo "id, name"
     ;;
 esac
+
+if [ -z "$query" ]; then
+  printf "psql stdin start\n" >> "$COMMAND_LOG"
+  cat >> "$COMMAND_LOG"
+  printf "psql stdin end\n" >> "$COMMAND_LOG"
+fi
 exit 0
 SH
 chmod +x "$FAKE_BIN_DIR/psql"
@@ -101,6 +110,9 @@ assert_log_absent() {
 
 assert_log_contains "--schema=public --schema=analytics" "pg_dump is constrained to included schemas"
 assert_log_absent "--schema=partman" "pg_dump excludes partman schema"
+assert_log_contains "CREATE SCHEMA IF NOT EXISTS public;" "public schema restore is idempotent"
+assert_log_absent "CREATE SCHEMA public;" "public schema restore does not fail on default target schema"
+assert_log_contains "CREATE SCHEMA analytics;" "non-public schemas are still created normally"
 assert_log_contains "bucardo add all tables db=heroku -n public relgroup=planetscale_import" "Bucardo add all tables is used for public"
 assert_log_contains "bucardo add all tables db=heroku -n analytics relgroup=planetscale_import" "Bucardo add all tables is used for analytics"
 assert_log_contains "bucardo add all sequences db=heroku -n public relgroup=planetscale_import" "Bucardo add all sequences is schema filtered"

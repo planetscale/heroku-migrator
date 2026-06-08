@@ -90,6 +90,7 @@ if [ "$SKIP_SCHEMA" -eq 0 ]; then
     PG_DUMP_SCHEMA_ARGS="${PG_DUMP_SCHEMA_ARGS} --schema=${schema}"
   done
   pg_dump --no-owner --no-privileges --no-publications --no-subscriptions --schema-only $PG_DUMP_SCHEMA_ARGS "$PRIMARY" |
+  sed -E "s/^CREATE SCHEMA public;$/CREATE SCHEMA IF NOT EXISTS public;/" |
   grep -v -E "^COMMENT ON EXTENSION " |
   psql "$REPLICA" -a --set ON_ERROR_STOP=1
 else
