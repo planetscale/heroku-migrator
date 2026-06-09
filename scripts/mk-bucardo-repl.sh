@@ -33,10 +33,64 @@ if [ -z "$PRIMARY" -o -z "$REPLICA" ]
 then usage 1
 fi
 
+MIGRATION_SCHEMAS="${MIGRATION_SCHEMAS:-public}"
+MIGRATION_EXCLUDE_SCHEMAS="${MIGRATION_EXCLUDE_SCHEMAS:-heroku_ext,partman,pg_partman,bucardo,pg_catalog,information_schema}"
+
+schema_list() {
+  printf "%s" "$1" |
+  tr "," "\n" |
+  sed -e "s/^[[:space:]]*//" -e "s/[[:space:]]*$//" |
+  awk 'length($0) && !seen[$0]++'
+}
+
+schema_list_contains() {
+  needle="$1"
+  list="$2"
+  printf "%s\n" "$list" | awk -v needle="$needle" '$0 == needle { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+sql_quote() {
+  printf "'%s'" "$(printf "%s" "$1" | sed "s/'/''/g")"
+}
+
+REQUESTED_SCHEMAS="$(schema_list "$MIGRATION_SCHEMAS")"
+EXCLUDED_SCHEMAS="$(schema_list "$MIGRATION_EXCLUDE_SCHEMAS")"
+INCLUDED_SCHEMAS=""
+for schema in $REQUESTED_SCHEMAS
+do
+  if ! schema_list_contains "$schema" "$EXCLUDED_SCHEMAS"
+  then
+    INCLUDED_SCHEMAS="${INCLUDED_SCHEMAS}${INCLUDED_SCHEMAS:+
+}${schema}"
+  fi
+done
+
+if [ -z "$INCLUDED_SCHEMAS" ]
+then
+  echo "No migration schemas remain after applying MIGRATION_EXCLUDE_SCHEMAS" >&2
+  exit 1
+fi
+
+SCHEMA_SQL_LIST=""
+for schema in $INCLUDED_SCHEMAS
+do
+  quoted="$(sql_quote "$schema")"
+  SCHEMA_SQL_LIST="${SCHEMA_SQL_LIST}${SCHEMA_SQL_LIST:+, }${quoted}"
+done
+
+echo "Migrating schemas: $(printf "%s" "$INCLUDED_SCHEMAS" | paste -sd "," -)"
+echo "Excluded schemas: $(printf "%s" "$EXCLUDED_SCHEMAS" | paste -sd "," -)"
+
 # Copy the schema from the primary to the (soon to be) replica.
 if [ "$SKIP_SCHEMA" -eq 0 ]; then
   echo "Copying schema from primary to replica..."
-  pg_dump --no-owner --no-privileges --no-publications --no-subscriptions --schema-only "$PRIMARY" |
+  PG_DUMP_SCHEMA_ARGS=""
+  for schema in $INCLUDED_SCHEMAS
+  do
+    PG_DUMP_SCHEMA_ARGS="${PG_DUMP_SCHEMA_ARGS} --schema=${schema}"
+  done
+  pg_dump --no-owner --no-privileges --no-publications --no-subscriptions --schema-only $PG_DUMP_SCHEMA_ARGS "$PRIMARY" |
+  sed -E "s/^CREATE SCHEMA public;$/CREATE SCHEMA IF NOT EXISTS public;/" |
   grep -v -E "^COMMENT ON EXTENSION " |
   psql "$REPLICA" -a --set ON_ERROR_STOP=1
 else
@@ -60,9 +114,12 @@ bucardo add database "planetscale" \
   password="$(echo "$REPLICA" | cut -d ":" -f 3 | cut -d "@" -f 1)" \
   dbname="$(echo "$REPLICA" | cut -d "/" -f 4 | cut -d "?" -f 1)"
 
-# Add all the sequences and tables to Bucardo.
-bucardo add all sequences --relgroup "planetscale_import"
-bucardo add all tables --relgroup "planetscale_import"
+# Add all the sequences and tables in each included schema to Bucardo.
+for schema in $INCLUDED_SCHEMAS
+do
+  bucardo add all sequences db=heroku -n "$schema" relgroup=planetscale_import
+  bucardo add all tables db=heroku -n "$schema" relgroup=planetscale_import
+done
 
 # Bucardo 5.6 does not filter out PostgreSQL generated columns when issuing
 # COPY against the target, which fails with "column ... is a generated column /
@@ -76,7 +133,7 @@ GENERATED_TABLES=$(psql "$PRIMARY" -A -t -F"|" -c "
   FROM pg_attribute a
   JOIN pg_class c ON c.oid = a.attrelid
   JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname = 'public' AND c.relkind = 'r'
+  WHERE n.nspname IN (${SCHEMA_SQL_LIST}) AND c.relkind = 'r'
     AND a.attnum > 0 AND NOT a.attisdropped
     AND a.attgenerated <> ''
   ORDER BY n.nspname, c.relname;")
@@ -88,7 +145,7 @@ if [ -n "$GENERATED_TABLES" ]; then
     cols=$(psql "$PRIMARY" -A -t -c "
       SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum)
       FROM pg_attribute
-      WHERE attrelid = '${schema}.${table}'::regclass
+      WHERE attrelid = format('%I.%I', '${schema}', '${table}')::regclass
         AND attnum > 0 AND NOT attisdropped
         AND attgenerated = '';")
     if [ -z "$cols" ]; then
@@ -113,6 +170,9 @@ fi
 # The default 30s timeout is too short for databases with many tables, since
 # each table is inspected on both source and target over remote connections.
 bucardo set reload_config_timeout=180 log_level=verbose
+bucardo set tcp_keepalives_idle=60
+bucardo set tcp_keepalives_interval=10
+bucardo set tcp_keepalives_count=6
 
 # Reload Bucardo, which starts the sync we just added.
 bucardo reload

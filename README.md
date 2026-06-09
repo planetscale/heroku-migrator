@@ -60,6 +60,24 @@ heroku pg:locks -a your-app-name
 
 If you see any `VACUUM` queries with `(to prevent wraparound)` in the output, wait for them to finish before starting the migration.
 
+### 4a. If you use pg_partman
+
+The migrator supports pg_partman-managed tables by migrating only the configured
+application schemas. By default it includes `public` and excludes internal
+schemas such as `partman`, `pg_partman`, `heroku_ext`, `bucardo`, `pg_catalog`,
+and `information_schema`.
+
+Before starting:
+
+1. Pause pg_partman maintenance jobs on Heroku for the migration window.
+2. Install the pg_partman extension on PlanetScale.
+3. Confirm pg_partman config tables live in `partman` or `pg_partman`, not in an included application schema.
+4. Review the dashboard pg_partman preflight callout. It shows parent tables and generated SQL from `partman.dump_partitioned_table_definition(parent_table)`.
+
+After schema copy finishes, apply the generated SQL manually on PlanetScale to
+recreate pg_partman partition sets. The migrator does not auto-apply this SQL.
+`dump_partitioned_table_definition` supports single-level partition sets only.
+
 ### 5. Size your PlanetScale database
 
 **Cluster size:** Choose a PlanetScale cluster with similar CPU and RAM to your Heroku Postgres plan. You don't need to get this exactly right. [Resizing in PlanetScale is an online operation](https://planetscale.com/docs/postgres/cluster-configuration) with no downtime, and you are only billed for the time you use.
@@ -165,6 +183,15 @@ Click the button at the top of this page, or deploy manually:
      PLANETSCALE_URL="postgresql://..." \
      PASSWORD="choose-a-password"
    ```
+
+   Optional schema scope for pg_partman or multi-schema applications:
+
+   ```bash
+   heroku config:set \
+     MIGRATION_SCHEMAS=public \
+     MIGRATION_EXCLUDE_SCHEMAS=heroku_ext,partman,pg_partman \
+     -a <migration-app>
+   ```
 4. Deploy:
    ```bash
    git push heroku main
@@ -220,6 +247,11 @@ Once you open the dashboard and click **Start Migration**, the process follows t
 
 The migrator copies your database structure (tables, indexes, constraints) from Heroku to PlanetScale and configures Bucardo replication. This is fully automatic and typically takes a minute or two.
 
+Bucardo still uses `add all tables` and `add all sequences`, but the migrator
+calls those commands once per included schema using Bucardo's schema filter.
+This keeps pg_partman config/internal schemas out of the relgroup while still
+replicating leaf partition tables that live in included application schemas.
+
 ### Step 2: Data sync
 
 All existing rows are copied from Heroku to PlanetScale (the "initial copy"). Once that finishes, Bucardo enters real-time replication mode. Every new write to your Heroku database is automatically replicated to PlanetScale.
@@ -235,10 +267,10 @@ In either case, Bucardo's triggers stay on your Heroku database while paused, so
 
 ### Step 3: Switch traffic
 
-When the dashboard shows your databases are in sync, you're ready to cut over. Click **Switch Traffic** to block writes on your Heroku database. This runs a SQL `REVOKE` command that removes `INSERT`, `UPDATE`, and `DELETE` privileges from your Heroku database user:
+When the dashboard shows your databases are in sync, you're ready to cut over. Click **Switch Traffic** to block writes on your Heroku database. This runs a SQL `REVOKE` command that removes `INSERT`, `UPDATE`, and `DELETE` privileges from your Heroku database user across the configured migration schemas:
 
 ```sql
-REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public FROM your_heroku_user;
+REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public, other_schema FROM your_heroku_user;
 ```
 
 For production apps, consider enabling Heroku maintenance mode before clicking
@@ -333,6 +365,8 @@ Plan migration windows around the **initial copy** and your post-copy validation
 | `HEROKU_URL` | Yes | Heroku Postgres connection URL |
 | `PLANETSCALE_URL` | Yes | PlanetScale Postgres connection URL |
 | `PASSWORD` | Yes | Password to access the migration dashboard |
+| `MIGRATION_SCHEMAS` | No | Comma-separated schemas to migrate. Defaults to `public`. |
+| `MIGRATION_EXCLUDE_SCHEMAS` | No | Comma-separated schemas removed from `MIGRATION_SCHEMAS`. Defaults to `heroku_ext,partman,pg_partman,bucardo,pg_catalog,information_schema`. |
 | `DISABLE_NOTIFICATIONS` | No | Set to `true` to disable migration progress notifications to PlanetScale (enabled by default) |
 
 ## What is Bucardo?
