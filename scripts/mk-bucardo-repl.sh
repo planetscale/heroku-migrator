@@ -76,7 +76,10 @@ GENERATED_TABLES=$(psql "$PRIMARY" -A -t -F"|" -c "
   FROM pg_attribute a
   JOIN pg_class c ON c.oid = a.attrelid
   JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname = 'public' AND c.relkind = 'r'
+  WHERE n.nspname <> 'information_schema'
+    AND n.nspname <> 'bucardo'
+    AND left(n.nspname, 3) <> 'pg_'
+    AND c.relkind = 'r'
     AND a.attnum > 0 AND NOT a.attisdropped
     AND a.attgenerated <> ''
   ORDER BY n.nspname, c.relname;")
@@ -88,7 +91,7 @@ if [ -n "$GENERATED_TABLES" ]; then
     cols=$(psql "$PRIMARY" -A -t -c "
       SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum)
       FROM pg_attribute
-      WHERE attrelid = '${schema}.${table}'::regclass
+      WHERE attrelid = format('%I.%I', '${schema}', '${table}')::regclass
         AND attnum > 0 AND NOT attisdropped
         AND attgenerated = '';")
     if [ -z "$cols" ]; then
