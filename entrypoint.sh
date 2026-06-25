@@ -190,6 +190,12 @@ RCEOF
   echo "Configuring Bucardo verbose logging..."
   bucardo set log_level=verbose
 
+  # Keep remote database connections alive across infrastructure with aggressive
+  # idle TCP timeouts, such as EC2 network paths.
+  bucardo set tcp_keepalives_idle=60
+  bucardo set tcp_keepalives_interval=10
+  bucardo set tcp_keepalives_count=6
+
   echo "Starting Bucardo daemon..."
   bucardo start || bucardo restart
 fi
