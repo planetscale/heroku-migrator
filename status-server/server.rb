@@ -321,32 +321,40 @@ rescue StandardError
   []
 end
 
-# Returns public tables that contain at least one generated column, along with
-# the names of those columns. Bucardo 5.6 cannot include generated columns in
-# COPY, so the migrator's setup script registers customcols overrides for them
-# automatically. This check is informational only -- it does NOT block start.
+# Returns tables that contain at least one generated column,
+# along with the names of those columns. Bucardo 5.6 cannot include generated
+# columns in COPY, so the migrator's setup script registers customcols overrides
+# for them automatically. This check is informational only -- it does NOT block
+# start.
 def check_tables_with_generated_columns
   return [] unless HEROKU_URL
 
-  query = "SELECT c.relname, a.attname " \
+  query = "SELECT n.nspname, c.relname, a.attname " \
           "FROM pg_attribute a " \
           "JOIN pg_class c ON c.oid = a.attrelid " \
           "JOIN pg_namespace n ON n.oid = c.relnamespace " \
-          "WHERE n.nspname = 'public' AND c.relkind = 'r' " \
+          "WHERE n.nspname <> 'information_schema' " \
+          "  AND n.nspname <> 'bucardo' " \
+          "  AND left(n.nspname, 3) <> 'pg_' " \
+          "  AND c.relkind = 'r' " \
           "  AND a.attnum > 0 AND NOT a.attisdropped " \
           "  AND a.attgenerated <> '' " \
-          "ORDER BY c.relname, a.attnum;"
+          "ORDER BY n.nspname, c.relname, a.attnum;"
   output = `psql "#{HEROKU_URL}" -A -t -F"|" -c "#{query}" 2>/dev/null`.strip
   return [] if output.empty?
 
   by_table = {}
   output.split("\n").each do |line|
     parts = line.strip.split("|")
-    next unless parts.length == 2
-    table = normalize_table_name(parts[0])
-    column = parts[1].to_s.strip
-    next if table.nil? || column.empty?
-    (by_table[table] ||= []) << column
+    next unless parts.length == 3
+    schema = parts[0].to_s.strip
+    table = parts[1].to_s.strip
+    column = parts[2].to_s.strip
+    next if schema.empty? || table.empty? || column.empty?
+    # Schema-qualify non-public tables so a table name that exists in more than
+    # one schema does not collide into a single entry.
+    display = schema == "public" ? table : "#{schema}.#{table}"
+    (by_table[display] ||= []) << column
   end
 
   by_table.map { |table, columns| { "table" => table, "columns" => columns.uniq } }
