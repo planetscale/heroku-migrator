@@ -33,12 +33,86 @@ if [ -z "$PRIMARY" -o -z "$REPLICA" ]
 then usage 1
 fi
 
+internal_schema_filter_sql() {
+  cat <<'SQL'
+    n.nspname <> 'information_schema'
+    AND n.nspname <> 'bucardo'
+    AND n.nspname <> 'heroku_ext'
+    AND left(n.nspname, 3) <> 'pg_'
+SQL
+}
+
+sql_identifier() {
+  printf '"%s"' "$(printf "%s" "$1" | sed 's/"/""/g')"
+}
+
+pg_partman_relation_filter_sql() {
+  if [ -z "$PG_PARTMAN_SCHEMA" ]; then
+    return
+  fi
+
+  pg_partman_ident=$(sql_identifier "$PG_PARTMAN_SCHEMA")
+  cat <<SQL
+    AND NOT EXISTS (
+      SELECT 1
+      FROM pg_depend d
+      JOIN pg_extension e ON e.oid = d.refobjid
+      WHERE e.extname = 'pg_partman'
+        AND d.classid = 'pg_class'::regclass
+        AND d.objid = c.oid
+        AND d.deptype = 'e'
+    )
+    AND c.oid NOT IN (
+      SELECT template_oid
+      FROM (
+        SELECT to_regclass(template_table) AS template_oid
+        FROM ${pg_partman_ident}.part_config
+        WHERE template_table IS NOT NULL
+      ) pg_partman_templates
+      WHERE template_oid IS NOT NULL
+    )
+SQL
+}
+
+PG_PARTMAN_SCHEMA=$(psql "$PRIMARY" -A -t -c "
+  SELECT n.nspname
+  FROM pg_extension e
+  JOIN pg_namespace n ON n.oid = e.extnamespace
+  WHERE e.extname = 'pg_partman'
+    AND EXISTS (
+      SELECT 1
+      FROM pg_class c
+      WHERE c.relnamespace = n.oid
+        AND c.relname = 'part_config'
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM pg_proc p
+      WHERE p.pronamespace = n.oid
+        AND p.proname = 'dump_partitioned_table_definition'
+    )
+  ORDER BY n.nspname
+  LIMIT 1;")
+
 # Copy the schema from the primary to the (soon to be) replica.
 if [ "$SKIP_SCHEMA" -eq 0 ]; then
   echo "Copying schema from primary to replica..."
   pg_dump --no-owner --no-privileges --no-publications --no-subscriptions --schema-only "$PRIMARY" |
   grep -v -E "^COMMENT ON EXTENSION " |
   psql "$REPLICA" -a --set ON_ERROR_STOP=1
+
+  if [ -n "$PG_PARTMAN_SCHEMA" ]; then
+    echo "Detected pg_partman metadata; recreating partition maintenance configuration on replica..."
+    pg_partman_ident=$(sql_identifier "$PG_PARTMAN_SCHEMA")
+    PG_PARTMAN_RECREATE_SQL=$(psql "$PRIMARY" -A -t -c "
+      SELECT ${pg_partman_ident}.dump_partitioned_table_definition(parent_table)
+      FROM ${pg_partman_ident}.part_config
+      ORDER BY parent_table;")
+    if [ -n "$PG_PARTMAN_RECREATE_SQL" ]; then
+      printf "%s\n" "$PG_PARTMAN_RECREATE_SQL" |
+      psql "$REPLICA" -a --set ON_ERROR_STOP=1
+    fi
+  fi
 else
   echo "Skipping schema copy (--skip-schema flag set)"
 fi
@@ -60,9 +134,53 @@ bucardo add database "planetscale" \
   password="$(echo "$REPLICA" | cut -d ":" -f 3 | cut -d "@" -f 1)" \
   dbname="$(echo "$REPLICA" | cut -d "/" -f 4 | cut -d "?" -f 1)"
 
-# Add all the sequences and tables to Bucardo.
-bucardo add all sequences --relgroup "planetscale_import"
-bucardo add all tables --relgroup "planetscale_import"
+# Add application sequences and tables to Bucardo. Extension/internal schemas
+# such as pg_partman are schema-copied above but should not be replicated.
+REPLICATION_SCHEMAS=$(psql "$PRIMARY" -A -t -c "
+  SELECT n.nspname
+  FROM pg_namespace n
+  WHERE $(internal_schema_filter_sql)
+    AND EXISTS (
+      SELECT 1
+      FROM pg_class c
+      WHERE c.relnamespace = n.oid
+        AND c.relkind IN ('r', 'p', 'S')
+        $(pg_partman_relation_filter_sql)
+    )
+  ORDER BY n.nspname;")
+
+if [ -z "$REPLICATION_SCHEMAS" ]; then
+  echo "No application schemas with tables or sequences were found for Bucardo replication" >&2
+  exit 1
+fi
+
+printf "%s\n" "$REPLICATION_SCHEMAS" | while IFS= read -r schema
+do
+  [ -z "$schema" ] && continue
+  echo "Adding Bucardo relations from schema: $schema"
+  bucardo add all sequences db=heroku -n "$schema" relgroup=planetscale_import
+done
+
+REPLICATION_TABLES=$(psql "$PRIMARY" -A -t -c "
+  SELECT format('%I.%I', n.nspname, c.relname)
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE $(internal_schema_filter_sql)
+    AND c.relkind = 'r'
+    $(pg_partman_relation_filter_sql)
+  ORDER BY n.nspname, c.relname;")
+
+if [ -z "$REPLICATION_TABLES" ]; then
+  echo "No application tables were found for Bucardo replication" >&2
+  exit 1
+fi
+
+printf "%s\n" "$REPLICATION_TABLES" | while IFS= read -r table
+do
+  [ -z "$table" ] && continue
+  echo "Adding Bucardo table: $table"
+  bucardo add table "$table" db=heroku relgroup=planetscale_import
+done
 
 # Bucardo 5.6 does not filter out PostgreSQL generated columns when issuing
 # COPY against the target, which fails with "column ... is a generated column /
@@ -76,10 +194,9 @@ GENERATED_TABLES=$(psql "$PRIMARY" -A -t -F"|" -c "
   FROM pg_attribute a
   JOIN pg_class c ON c.oid = a.attrelid
   JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname <> 'information_schema'
-    AND n.nspname <> 'bucardo'
-    AND left(n.nspname, 3) <> 'pg_'
+  WHERE $(internal_schema_filter_sql)
     AND c.relkind = 'r'
+    $(pg_partman_relation_filter_sql)
     AND a.attnum > 0 AND NOT a.attisdropped
     AND a.attgenerated <> ''
   ORDER BY n.nspname, c.relname;")
@@ -106,10 +223,10 @@ fi
 # Add the sync configuration to Bucardo.
 if [ "$NO_INITIAL_COPY" -eq 0 ]; then
   echo "Configuring sync with initial data copy..."
-  bucardo add sync "planetscale_import" dbs="heroku,planetscale" onetimecopy=1 relgroup="planetscale_import"
+  bucardo add sync "planetscale_import" dbs="heroku,planetscale" onetimecopy=1 checktime=5 relgroup="planetscale_import"
 else
   echo "Configuring sync without initial copy (--no-initial-copy flag set)..."
-  bucardo add sync "planetscale_import" dbs="heroku,planetscale" onetimecopy=0 relgroup="planetscale_import"
+  bucardo add sync "planetscale_import" dbs="heroku,planetscale" onetimecopy=0 checktime=5 relgroup="planetscale_import"
 fi
 
 # Give Bucardo enough time to validate all tables across both databases.
