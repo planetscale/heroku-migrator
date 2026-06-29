@@ -50,6 +50,12 @@ heroku pg:psql -a your-app-name -c "SELECT extname, extversion FROM pg_extension
 
 For each extension listed, enable it on your PlanetScale database before starting the migration. See the [PlanetScale Postgres extensions documentation](https://planetscale.com/docs/postgres/extensions) for supported extensions and how to enable them. If you need help, [contact us](https://planetscale.com/contact).
 
+If your Heroku database uses `pg_partman`, the migrator copies the partitioned
+table schema and uses pg_partman's metadata dump function to recreate partition
+maintenance configuration on PlanetScale. Bucardo then replicates the
+application partition tables, but it intentionally does not replicate
+pg_partman's internal schemas such as `partman` or `pg_partman`.
+
 ### 4. Check for blocking vacuum processes
 
 Bucardo creates triggers on your Heroku tables to track changes. In rare cases, a long-running autovacuum process can block trigger creation, which can also block your application's queries. Before starting the migration, check for wraparound vacuum processes:
