@@ -54,7 +54,7 @@ If your Heroku database uses `pg_partman`, the migrator copies the partitioned
 table schema and uses pg_partman's metadata dump function to recreate partition
 maintenance configuration on PlanetScale. Bucardo then replicates the
 application partition tables, but it intentionally does not replicate
-pg_partman's internal schemas such as `partman` or `pg_partman`.
+pg_partman's internal configuration or template tables.
 
 ### 4. Check for blocking vacuum processes
 

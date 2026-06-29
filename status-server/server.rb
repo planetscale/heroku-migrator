@@ -336,8 +336,6 @@ def check_tables_with_generated_columns
           "WHERE n.nspname <> 'information_schema' " \
           "  AND n.nspname <> 'bucardo' " \
           "  AND n.nspname <> 'heroku_ext' " \
-          "  AND n.nspname <> 'partman' " \
-          "  AND n.nspname <> 'pg_partman' " \
           "  AND left(n.nspname, 3) <> 'pg_' " \
           "  AND c.relkind = 'r' " \
           "  AND a.attnum > 0 AND NOT a.attisdropped " \

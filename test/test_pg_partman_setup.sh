@@ -20,11 +20,11 @@ printf "pg_dump %s\n" "$*" >> "$COMMAND_LOG"
 cat <<'SQL'
 CREATE SCHEMA public;
 CREATE SCHEMA app_private;
-CREATE SCHEMA partman;
-CREATE EXTENSION pg_partman WITH SCHEMA partman;
+CREATE EXTENSION pg_partman;
 CREATE TABLE public.partman_events (id bigint, created_at timestamptz NOT NULL, payload jsonb NOT NULL, PRIMARY KEY (id, created_at)) PARTITION BY RANGE (created_at);
 CREATE TABLE app_private.docs (id bigint PRIMARY KEY, title text NOT NULL);
-CREATE TABLE partman.template_public_partman_events (LIKE public.partman_events);
+CREATE TABLE public.part_config (parent_table text PRIMARY KEY, template_table text);
+CREATE TABLE public.template_public_partman_events (LIKE public.partman_events);
 SQL
 SH
 chmod +x "$FAKE_BIN_DIR/pg_dump"
@@ -42,18 +42,18 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$query" in
+  *"FROM pg_extension e"*"e.extname = 'pg_partman'"*)
+    echo "public"
+    ;;
   *"dump_partitioned_table_definition(parent_table)"*"part_config"*)
     cat <<'SQL'
-SELECT partman.create_parent(
+SELECT public.create_parent(
   p_parent_table := 'public.partman_events',
   p_control := 'created_at',
   p_interval := '1 month',
   p_type := 'range'
 );
 SQL
-    ;;
-  *"part_config"*"pg_proc"*"dump_partitioned_table_definition"*)
-    echo "partman"
     ;;
   *"SELECT n.nspname"*"c.relkind IN ('r', 'p', 'S')"*)
     echo "app_private"
@@ -128,14 +128,14 @@ assert_log_absent() {
   fi
 }
 
-assert_log_contains "CREATE EXTENSION pg_partman WITH SCHEMA partman;" "schema copy preserves pg_partman extension"
-assert_log_contains "SELECT partman.create_parent(" "pg_partman recreation SQL is applied to replica"
+assert_log_contains "CREATE EXTENSION pg_partman;" "schema copy preserves pg_partman extension"
+assert_log_contains "SELECT public.create_parent(" "pg_partman recreation SQL is applied to replica"
 assert_log_contains "bucardo add table public.posts db=heroku relgroup=planetscale_import" "Bucardo includes public application table"
 assert_log_contains "bucardo add table app_private.docs db=heroku relgroup=planetscale_import" "Bucardo includes non-public application table"
 assert_log_contains "bucardo add table public.partman_events_p20260101 db=heroku relgroup=planetscale_import" "Bucardo includes partition leaf tables"
 assert_log_absent "bucardo add table public.partman_events db=heroku relgroup=planetscale_import" "Bucardo excludes partitioned parent table"
-assert_log_absent "bucardo add table partman.template_public_partman_events" "Bucardo excludes pg_partman template table"
-assert_log_absent "bucardo add all sequences db=heroku -n partman" "Bucardo excludes pg_partman internal sequences"
+assert_log_absent "bucardo add table public.part_config" "Bucardo excludes pg_partman config table"
+assert_log_absent "bucardo add table public.template_public_partman_events" "Bucardo excludes pg_partman template table"
 assert_log_contains "bucardo add sync planetscale_import dbs=heroku,planetscale onetimecopy=1 checktime=5 relgroup=planetscale_import" "Bucardo sync has periodic checktime fallback"
 assert_log_contains "bucardo add customcols public.posts SELECT id, title db=planetscale" "Generated-column customcols still run for public tables"
 assert_log_contains "bucardo add customcols app_private.docs SELECT id, title db=planetscale" "Generated-column customcols still run for non-public tables"

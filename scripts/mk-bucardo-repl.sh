@@ -38,8 +38,6 @@ internal_schema_filter_sql() {
     n.nspname <> 'information_schema'
     AND n.nspname <> 'bucardo'
     AND n.nspname <> 'heroku_ext'
-    AND n.nspname <> 'partman'
-    AND n.nspname <> 'pg_partman'
     AND left(n.nspname, 3) <> 'pg_'
 SQL
 }
@@ -48,31 +46,60 @@ sql_identifier() {
   printf '"%s"' "$(printf "%s" "$1" | sed 's/"/""/g')"
 }
 
+pg_partman_relation_filter_sql() {
+  if [ -z "$PG_PARTMAN_SCHEMA" ]; then
+    return
+  fi
+
+  pg_partman_ident=$(sql_identifier "$PG_PARTMAN_SCHEMA")
+  cat <<SQL
+    AND NOT EXISTS (
+      SELECT 1
+      FROM pg_depend d
+      JOIN pg_extension e ON e.oid = d.refobjid
+      WHERE e.extname = 'pg_partman'
+        AND d.classid = 'pg_class'::regclass
+        AND d.objid = c.oid
+        AND d.deptype = 'e'
+    )
+    AND c.oid NOT IN (
+      SELECT template_oid
+      FROM (
+        SELECT to_regclass(template_table) AS template_oid
+        FROM ${pg_partman_ident}.part_config
+        WHERE template_table IS NOT NULL
+      ) pg_partman_templates
+      WHERE template_oid IS NOT NULL
+    )
+SQL
+}
+
+PG_PARTMAN_SCHEMA=$(psql "$PRIMARY" -A -t -c "
+  SELECT n.nspname
+  FROM pg_extension e
+  JOIN pg_namespace n ON n.oid = e.extnamespace
+  WHERE e.extname = 'pg_partman'
+    AND EXISTS (
+      SELECT 1
+      FROM pg_class c
+      WHERE c.relnamespace = n.oid
+        AND c.relname = 'part_config'
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM pg_proc p
+      WHERE p.pronamespace = n.oid
+        AND p.proname = 'dump_partitioned_table_definition'
+    )
+  ORDER BY n.nspname
+  LIMIT 1;")
+
 # Copy the schema from the primary to the (soon to be) replica.
 if [ "$SKIP_SCHEMA" -eq 0 ]; then
   echo "Copying schema from primary to replica..."
   pg_dump --no-owner --no-privileges --no-publications --no-subscriptions --schema-only "$PRIMARY" |
   grep -v -E "^COMMENT ON EXTENSION " |
   psql "$REPLICA" -a --set ON_ERROR_STOP=1
-
-  PG_PARTMAN_SCHEMA=$(psql "$PRIMARY" -A -t -c "
-    SELECT n.nspname
-    FROM pg_namespace n
-    WHERE n.nspname IN ('partman', 'pg_partman')
-      AND EXISTS (
-        SELECT 1
-        FROM pg_class c
-        WHERE c.relnamespace = n.oid
-          AND c.relname = 'part_config'
-      )
-      AND EXISTS (
-        SELECT 1
-        FROM pg_proc p
-        WHERE p.pronamespace = n.oid
-          AND p.proname = 'dump_partitioned_table_definition'
-      )
-    ORDER BY n.nspname
-    LIMIT 1;")
 
   if [ -n "$PG_PARTMAN_SCHEMA" ]; then
     echo "Detected pg_partman metadata; recreating partition maintenance configuration on replica..."
@@ -118,6 +145,7 @@ REPLICATION_SCHEMAS=$(psql "$PRIMARY" -A -t -c "
       FROM pg_class c
       WHERE c.relnamespace = n.oid
         AND c.relkind IN ('r', 'p', 'S')
+        $(pg_partman_relation_filter_sql)
     )
   ORDER BY n.nspname;")
 
@@ -139,6 +167,7 @@ REPLICATION_TABLES=$(psql "$PRIMARY" -A -t -c "
   JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE $(internal_schema_filter_sql)
     AND c.relkind = 'r'
+    $(pg_partman_relation_filter_sql)
   ORDER BY n.nspname, c.relname;")
 
 if [ -z "$REPLICATION_TABLES" ]; then
@@ -167,6 +196,7 @@ GENERATED_TABLES=$(psql "$PRIMARY" -A -t -F"|" -c "
   JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE $(internal_schema_filter_sql)
     AND c.relkind = 'r'
+    $(pg_partman_relation_filter_sql)
     AND a.attnum > 0 AND NOT a.attisdropped
     AND a.attgenerated <> ''
   ORDER BY n.nspname, c.relname;")
