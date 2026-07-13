@@ -36,8 +36,20 @@ fi
 # Copy the schema from the primary to the (soon to be) replica.
 if [ "$SKIP_SCHEMA" -eq 0 ]; then
   echo "Copying schema from primary to replica..."
+
+  # This image's pg_dump is PostgreSQL 17, whose schema-only dumps always
+  # start with "SET transaction_timeout = 0;". That GUC only exists on
+  # PostgreSQL 17+, so psql aborts with "unrecognized configuration
+  # parameter" if the replica is running an older major version. Strip the
+  # line in that case; PG17+ replicas are unaffected.
+  EXCLUDE_PATTERN="^COMMENT ON EXTENSION "
+  REPLICA_VERSION_NUM=$(psql "$REPLICA" -Atc "SHOW server_version_num;")
+  if [ "$REPLICA_VERSION_NUM" -lt 170000 ]; then
+    EXCLUDE_PATTERN="$EXCLUDE_PATTERN|^SET transaction_timeout = 0;$"
+  fi
+
   pg_dump --no-owner --no-privileges --no-publications --no-subscriptions --schema-only "$PRIMARY" |
-  grep -v -E "^COMMENT ON EXTENSION " |
+  grep -v -E "$EXCLUDE_PATTERN" |
   psql "$REPLICA" -a --set ON_ERROR_STOP=1
 else
   echo "Skipping schema copy (--skip-schema flag set)"
