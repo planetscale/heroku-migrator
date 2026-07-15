@@ -784,6 +784,14 @@ def ensure_sync_for_copy_start
   raise "Failed to rebuild missing Bucardo sync: #{output.split("\n").last(8).join(" ")}"
 end
 
+# Runs rm-bucardo-repl.sh to deregister the Heroku/PlanetScale databases from
+# Bucardo's catalog and remove replication triggers. Used by /cleanup, /abort,
+# and /retry so a failed attempt never leaves a stale catalog entry behind.
+# Returns [success, output].
+def run_bucardo_teardown
+  output = `sh #{SCRIPTS_DIR}/rm-bucardo-repl.sh --primary "#{HEROKU_URL}" --replica "#{PLANETSCALE_URL}" 2>&1`
+  [$?.success?, output]
+end
 
 # ---------------------------------------------------------------------------
 # Server setup
@@ -1334,8 +1342,7 @@ server.mount_proc "/cleanup" do |req, res|
 
   # Run cleanup in a thread so we can respond immediately
   Thread.new do
-    output = `sh #{SCRIPTS_DIR}/rm-bucardo-repl.sh --primary "#{HEROKU_URL}" --replica "#{PLANETSCALE_URL}" 2>&1`
-    success = $?.success?
+    success, output = run_bucardo_teardown
     completed_at = Time.now.utc.iso8601
 
     File.write(STATUS_FILE, JSON.generate({
@@ -1377,15 +1384,45 @@ server.mount_proc "/retry" do |req, res|
     next
   end
 
-  File.write(STATUS_FILE, JSON.generate({
-    phase: "waiting",
-    state: "ready",
-    message: "Ready to start migration.",
-    error: nil,
-  }))
-  write_persistent_state("waiting")
+  started_at = current["started_at"]
 
-  res.body = JSON.generate({ success: true, message: "Migration reset. You can start again when ready." })
+  # A failed attempt may have already registered "heroku"/"planetscale" in
+  # Bucardo's catalog. Tear that down before resetting to "waiting" so the
+  # next attempt's mk-bucardo-repl.sh doesn't collide with a stale entry.
+  File.write(STATUS_FILE, JSON.generate({
+    phase: "cleaning_up",
+    state: "removing_replication",
+    message: "Removing Bucardo replication before retry...",
+    error: nil,
+    started_at: started_at,
+  }))
+  write_persistent_state("cleaning_up", started_at: started_at)
+
+  # Run cleanup in a thread so we can respond immediately
+  Thread.new do
+    success, output = run_bucardo_teardown
+
+    if success
+      File.write(STATUS_FILE, JSON.generate({
+        phase: "waiting",
+        state: "ready",
+        message: "Ready to start migration.",
+        error: nil,
+      }))
+      write_persistent_state("waiting")
+    else
+      File.write(STATUS_FILE, JSON.generate({
+        phase: "error",
+        state: "retry_cleanup_failed",
+        message: "Failed to remove Bucardo replication before retry.",
+        error: output,
+        started_at: started_at,
+      }))
+      write_persistent_state("error", started_at: started_at, error: output&.slice(0, 500))
+    end
+  end
+
+  res.body = JSON.generate({ success: true, message: "Cleaning up previous attempt. Check /status for progress." })
 end
 
 # POST /abort - emergency stop: removes all Bucardo triggers and replication from any active phase
@@ -1422,8 +1459,7 @@ server.mount_proc "/abort" do |req, res|
   notify_slack(":stop_sign: Migration aborted#{branch_tag}")
 
   Thread.new do
-    output = `sh #{SCRIPTS_DIR}/rm-bucardo-repl.sh --primary "#{HEROKU_URL}" --replica "#{PLANETSCALE_URL}" 2>&1`
-    success = $?.success?
+    success, output = run_bucardo_teardown
     completed_at = Time.now.utc.iso8601
 
     File.write(STATUS_FILE, JSON.generate({
