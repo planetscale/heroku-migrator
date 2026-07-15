@@ -20,7 +20,7 @@ scripts_dir = File.join(state_dir, "scripts")
 FileUtils.mkdir_p(scripts_dir)
 
 # Write no-op shell scripts so abort/setup don't fail
-File.write(File.join(scripts_dir, "rm-bucardo-repl.sh"), "#!/bin/sh\necho 'fake cleanup'\n")
+File.write(File.join(scripts_dir, "rm-bucardo-repl.sh"), "#!/bin/sh\necho 'fake cleanup'\ntouch \"$TEST_STATE_DIR/rm_bucardo_repl_called\"\n")
 File.write(File.join(scripts_dir, "mk-bucardo-repl.sh"), "#!/bin/sh\necho 'fake setup'\n")
 File.write(File.join(scripts_dir, "stat-bucardo-repl.sh"), "#!/bin/sh\necho 'fake stat'\n")
 

@@ -298,6 +298,7 @@ log "Scenario 7: Retry from error state"
 write_status << 'EOF'
 {"phase":"error","state":"setup_failed","message":"Setup failed","error":"something broke","started_at":"2026-01-01T00:00:00Z"}
 EOF
+rm -f "$TEST_STATE_DIR/rm_bucardo_repl_called"
 
 http_check POST /retry 200 '"success":true'
 
@@ -308,6 +309,14 @@ if [ "$level" = "waiting" ]; then
   pass "After retry, phase=waiting"
 else
   fail "After retry, phase=$level (expected waiting)"
+fi
+
+# Verify retry deregistered the stale Bucardo databases before resetting,
+# so the next attempt's mk-bucardo-repl.sh won't collide with them.
+if [ -f "$TEST_STATE_DIR/rm_bucardo_repl_called" ]; then
+  pass "Retry ran rm-bucardo-repl.sh to remove stale Bucardo catalog entries"
+else
+  fail "Retry did not run rm-bucardo-repl.sh"
 fi
 
 # === SCENARIO 8: Retry blocked from non-error phase =========================
