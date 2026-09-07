@@ -4,6 +4,36 @@
 
 This tool helps you migrate your Heroku Postgres database to [PlanetScale](https://planetscale.com) with minimal downtime. It runs as a temporary Heroku app that copies your data and keeps both databases in sync until you're ready to cut over.
 
+## Contents
+
+- [How does it work?](#how-does-it-work)
+- [Before you start](#before-you-start)
+  - [1. Get your Heroku database credentials](#1-get-your-heroku-database-credentials)
+  - [2. Create your PlanetScale database and get credentials](#2-create-your-planetscale-database-and-get-credentials)
+  - [3. Check your Heroku Postgres extensions](#3-check-your-heroku-postgres-extensions)
+  - [4. Check for blocking vacuum processes](#4-check-for-blocking-vacuum-processes)
+  - [5. Size your PlanetScale database](#5-size-your-planetscale-database)
+  - [6. Consider your database size and performance](#6-consider-your-database-size-and-performance)
+  - [7. Heroku's 24-hour restart limit](#7-herokus-24-hour-restart-limit)
+  - [8. Optional preflight SQL checks (recommended)](#8-optional-preflight-sql-checks-recommended)
+  - [9. Check application connection compatibility](#9-check-application-connection-compatibility)
+- [Deploy to Heroku](#deploy-to-heroku)
+- [How the migration works](#how-the-migration-works)
+  - [Step 1: Setup](#step-1-setup)
+  - [Step 2: Data sync](#step-2-data-sync)
+  - [Step 3: Switch traffic](#step-3-switch-traffic)
+  - [Step 4: Complete](#step-4-complete)
+- [Running another migration (rerun)](#running-another-migration-rerun)
+- [Verify cleanup completed](#verify-cleanup-completed)
+- [Expected warnings vs failures](#expected-warnings-vs-failures)
+- [Typical timing by phase](#typical-timing-by-phase)
+- [Environment variables](#environment-variables)
+- [Faster initial copy (deferred index rebuild)](#faster-initial-copy-deferred-index-rebuild)
+- [What is Bucardo?](#what-is-bucardo)
+- [Can I connect this to a Heroku follower/replica?](#can-i-connect-this-to-a-heroku-followerreplica)
+- [Need help?](#need-help)
+- [Local development](#local-development)
+
 ## How does it work?
 
 This app uses [Bucardo](https://bucardo.org/Bucardo/), an open-source PostgreSQL replication tool, to copy your data and keep it in sync in real-time. When you're ready, you switch your app to PlanetScale and tear down the replication. The whole process is managed through a web dashboard.
@@ -13,6 +43,8 @@ This app uses [Bucardo](https://bucardo.org/Bucardo/), an open-source PostgreSQL
 There are a few things to prepare before deploying the migrator.
 
 > **Important: do not make schema changes during the migration.** Bucardo discovers your tables, columns, and constraints when replication is configured and installs triggers based on that snapshot. Running `CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`, adding/removing indexes or columns, or any other DDL on Heroku **after** the migration starts will break replication and the run will need to be aborted and restarted. Pause all schema migrations on your application (including framework auto-migrations) for the entire duration of the migration -- from clicking **Start Migration** through **Complete Migration**. If you need to ship a schema change, finish or abort the migration first.
+
+> **Important: every table needs a primary key or unique index.** Bucardo uses one to identify rows, so **Start Migration** refuses to begin and lists any tables in `public` that have neither. Add a primary key or unique index to those tables first.
 
 ### 1. Get your Heroku database credentials
 
@@ -96,6 +128,8 @@ Copy speed varies by database, but most users can expect around **100 GB per hou
 
 If your Heroku database is large enough that the initial copy could take close to or longer than 24 hours, **do not deploy this tool on Heroku**. Instead, run the container somewhere that won't force-restart it, such as an AWS EC2 instance, ECS task, or GCP VM. The container is standard Docker, so deploying elsewhere is just `docker run` with the same environment variables:
 
+For AWS, we provide a ready-made **CloudFormation template** that provisions an EC2 instance with Docker, builds the migrator, and runs it under systemd (no 24-hour restart). See [templates/aws-cloudformation/heroku-migrator-ec2.yaml](templates/aws-cloudformation/heroku-migrator-ec2.yaml) and the [setup guide](templates/aws-cloudformation/README-heroku-migrator-ec2.md). To run the container manually on any host:
+
 ```bash
 docker build -t heroku-migrator .
 docker run -d \
@@ -103,7 +137,10 @@ docker run -d \
   -e PLANETSCALE_URL="postgresql://..." \
   -e PASSWORD="your-password" \
   -p 8080:8080 \
+  --user 1000:1000 \
   heroku-migrator
+# Optional index-rebuild tuning:
+#   -e INDEX_REBUILD_WORKERS=8 -e MAINTENANCE_WORK_MEM=1GB -e PARALLEL_MAINTENANCE_WORKERS=4
 ```
 
 For databases under ~1 TB, Heroku is typically fine. For anything larger, use a host without forced restarts to avoid re-copying data.
@@ -165,6 +202,16 @@ Click the button at the top of this page, or deploy manually:
      PLANETSCALE_URL="postgresql://..." \
      PASSWORD="choose-a-password"
    ```
+   Optionally, tune the post-copy index rebuild (defaults shown; see
+   [Faster initial copy](#faster-initial-copy-deferred-index-rebuild) and the
+   [Environment variables](#environment-variables) table). The parallel-jobs
+   count can also be changed live from the dashboard before the copy:
+   ```bash
+   heroku config:set \
+     INDEX_REBUILD_WORKERS=8 \
+     MAINTENANCE_WORK_MEM=1GB \
+     PARALLEL_MAINTENANCE_WORKERS=4
+   ```
 4. Deploy:
    ```bash
    git push heroku main
@@ -218,11 +265,11 @@ Once you open the dashboard and click **Start Migration**, the process follows t
 
 ### Step 1: Setup
 
-The migrator copies your database structure (tables, indexes, constraints) from Heroku to PlanetScale and configures Bucardo replication. This is fully automatic and typically takes a minute or two.
+The migrator copies your database structure (tables, indexes, constraints) from Heroku to PlanetScale and configures Bucardo replication. This runs on its own and typically takes a minute or two. It then stops and waits for you: no data is copied until you start the next step.
 
 ### Step 2: Data sync
 
-All existing rows are copied from Heroku to PlanetScale (the "initial copy"). Once that finishes, Bucardo enters real-time replication mode. Every new write to your Heroku database is automatically replicated to PlanetScale.
+Click **Start Data Copy** to begin. All existing rows are copied from Heroku to PlanetScale (the "initial copy"). Once that finishes, Bucardo enters real-time replication mode. Every new write to your Heroku database is automatically replicated to PlanetScale.
 
 Your Heroku app continues running normally throughout this entire process. You don't need to do anything until you're ready to switch.
 
@@ -248,6 +295,15 @@ against PlanetScale. Maintenance mode keeps user traffic out of the handoff
 window while you update and test the app.
 
 After this, your app can still **read** from Heroku, but any **write** query will fail with a permission error. This ensures no new data is written to Heroku while you switch over.
+
+**Verify the migration.** Now that writes are blocked, the source is frozen and the two databases can fully match — the most reliable moment to check. You can click **Verify Migration** in the dashboard to run an automated source-vs-target comparison. It usually finishes in under a minute and checks, at a high level:
+
+- **Tables, columns, indexes, constraints, and sequences** all present and matching on PlanetScale.
+- **Extensions** present and the same version.
+- **Row counts** — a random sample of up to 10 tables (skipping any over 10 GB, with a 60s-per-table cap so it never hangs).
+- **Pending replication** — every queued change must have been applied to PlanetScale. Run right after Switch Traffic this often still reports a backlog, which fails the check; it drains on its own, so wait a minute and re-run.
+
+Migrator/Bucardo objects (the `bucardo`, `_ps_migrator`, and `pscale_extensions` schemas) are excluded. The result is `PASSED`, `VERIFIED WITH WARNINGS`, or `FAILED` — review any warnings or failures before completing. It does not modify either database, so you can re-run it as many times as you like.
 
 Then update your app to use PlanetScale:
 
@@ -334,6 +390,53 @@ Plan migration windows around the **initial copy** and your post-copy validation
 | `PLANETSCALE_URL` | Yes | PlanetScale Postgres connection URL |
 | `PASSWORD` | Yes | Password to access the migration dashboard |
 | `DISABLE_NOTIFICATIONS` | No | Set to `true` to disable migration progress notifications to PlanetScale (enabled by default) |
+| `INDEX_REBUILD_WORKERS` | No | How many indexes to rebuild in parallel after the initial copy (default `8`). See [Faster initial copy](#faster-initial-copy-deferred-index-rebuild). |
+| `MAINTENANCE_WORK_MEM` | No | `maintenance_work_mem` applied to each index build, e.g. `1GB` (default `1GB`). Allocated per concurrent build. |
+| `PARALLEL_MAINTENANCE_WORKERS` | No | `max_parallel_maintenance_workers` per index build (default `4`). |
+| `DISABLE_INDEX_DEFERRAL` | No | Set to `true` to keep all indexes in place during the initial copy (disables the speedup below; default `false`). When `true`, `INDEX_REBUILD_WORKERS`, `MAINTENANCE_WORK_MEM`, and `PARALLEL_MAINTENANCE_WORKERS` have no effect. See [Faster initial copy](#faster-initial-copy-deferred-index-rebuild). |
+
+## Faster initial copy (deferred index rebuild)
+
+You have two options for how indexes are handled during the initial copy.
+
+### Option A: Deferred index rebuild (default)
+
+This is the default behavior (`DISABLE_INDEX_DEFERRAL` is `false`). To speed up the initial
+copy, the migrator drops the target's **secondary and unique indexes before copying** and
+rebuilds them **after** the copy completes. Building indexes once in bulk is far cheaper than
+maintaining them row-by-row during `COPY`, and it keeps a single bad index from being able to
+restart a multi-hour copy.
+
+How it works:
+
+1. After the schema is copied, the migrator records the exact definition of every secondary
+   and unique index (and any foreign keys that depend on a dropped unique) in a dedicated
+   `_ps_migrator` schema on the target, then drops them. **Primary keys are kept.** Drops use
+   `RESTRICT` (never `CASCADE`); any index with a dependent that cannot be fully reconstructed
+   is left in place and recorded as skipped, while the rest are still dropped.
+2. The initial copy runs against the index-light tables.
+3. When the copy finishes, **delta replication is paused** and the indexes are rebuilt in
+   parallel (`INDEX_REBUILD_WORKERS` at a time). Progress and any failures are shown on the
+   dashboard.
+4. If every index rebuilds, replication resumes automatically. If any index fails, the run
+   **pauses for review** so you can fix the issue and **Retry Failed Indexes**, or **Proceed
+   Anyway** (replication resumes; the affected tables stay slower until you add the index
+   manually). One failure never stops the others.
+
+The parallelism, per-job memory, and parallel-maintenance-workers of this rebuild are tunable
+with `INDEX_REBUILD_WORKERS`, `MAINTENANCE_WORK_MEM`, and `PARALLEL_MAINTENANCE_WORKERS` (see
+the [Environment variables](#environment-variables) table).
+
+### Option B: Keep all indexes in place (optional)
+
+If you'd rather not drop and rebuild anything, set `DISABLE_INDEX_DEFERRAL=true`. All indexes
+stay in place for the entire initial copy. This is **optional** and **off by default** —
+you only need it if you specifically want to avoid the drop/rebuild step. The trade-off is a **slower initial copy**, because every index is maintained row-by-row as
+data is copied.
+
+When `DISABLE_INDEX_DEFERRAL=true`, there is no post-copy rebuild, so
+`INDEX_REBUILD_WORKERS`, `MAINTENANCE_WORK_MEM`, and `PARALLEL_MAINTENANCE_WORKERS` have **no
+effect** and the dashboard hides the index-rebuild tuning control.
 
 ## What is Bucardo?
 
@@ -367,12 +470,31 @@ For troubleshooting notes from real Heroku cutovers, see [Heroku migration field
 
 ## Local development
 
+Build the image and run it with `docker run`. All configuration is via
+environment variables — the same ones used on Heroku (`heroku config:set`) — so
+local and Heroku deployments are configured identically.
+
 ```bash
 docker build -t heroku-migrator .
 docker run -it \
-  -e HEROKU_URL="postgres://user:pass@host:5432/dbname" \
-  -e PLANETSCALE_URL="postgresql://user:pass@host:5432/dbname?sslmode=require" \
+  --user 1000:1000 \
+  -e HEROKU_URL="postgres://user:pass@host:5432/dbname?sslmode=disable" \
+  -e PLANETSCALE_URL="postgresql://user:pass@host:5432/dbname?sslmode=disable" \
   -e PASSWORD="your-password" \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
   heroku-migrator
+# Then open http://localhost:8080  (Basic Auth user: admin)
 ```
+
+Notes:
+- `--user 1000:1000` runs as non-root (initdb refuses root). The entrypoint
+  self-owns its data dir, so no volume/chown setup is needed for an ephemeral run.
+- **Index-rebuild tuning** (optional; identical on Heroku via `heroku config:set`):
+  ```bash
+  -e INDEX_REBUILD_WORKERS=8 \
+  -e MAINTENANCE_WORK_MEM=1GB \
+  -e PARALLEL_MAINTENANCE_WORKERS=4
+  ```
+  `INDEX_REBUILD_WORKERS` (parallel index builds) can also be changed live from
+  the dashboard before starting the copy. Peak memory on the target ≈
+  `INDEX_REBUILD_WORKERS × MAINTENANCE_WORK_MEM`.

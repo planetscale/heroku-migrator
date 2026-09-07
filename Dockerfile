@@ -1,7 +1,10 @@
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
+# TMPDIR is what Perl/glibc honor on Linux (TMP is the Windows name); Bucardo
+# (Perl) needs it set or temp-dir resolution can fail.
 ENV TMP=/tmp
+ENV TMPDIR=/tmp
 ENV BUCARDO_VERSION=5.6.0
 ENV PATH="/usr/lib/postgresql/17/bin:$PATH"
 
@@ -41,9 +44,12 @@ RUN curl -L -o /tmp/bucardo-${BUCARDO_VERSION}.tar.gz \
     make install && \
     rm -rf /tmp/bucardo-*
 
-# Create writable directories for runtime use (Heroku runs as a random non-root UID)
+# Writable dirs for runtime (Heroku runs as a random non-root UID).
+# /tmp must be 1777 (sticky), not 777: Ruby's Dir.tmpdir rejects a non-sticky
+# world-writable temp dir, which breaks Dir.mktmpdir.
 RUN mkdir -p /var/run/bucardo /var/log/bucardo /opt/bucardo/pgdata /opt/bucardo/state && \
-    chmod 777 /var/run/bucardo /var/log/bucardo /opt/bucardo/pgdata /opt/bucardo/state /opt/bucardo /tmp && \
+    chmod 777 /var/run/bucardo /var/log/bucardo /opt/bucardo/pgdata /opt/bucardo/state /opt/bucardo && \
+    chmod 1777 /tmp && \
     echo '' > /etc/bucardorc && chmod 666 /etc/bucardorc && \
     chmod 666 /etc/passwd
 

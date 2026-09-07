@@ -324,6 +324,9 @@
     .btn-danger { background: transparent; color: #ff455d; border: 1px solid #ff455d; }
     .btn-danger:hover:not(:disabled) { background: #2a0a10; }
     .btn-sm { padding: 6px 12px; font-size: 12px; }
+    /* Highlight the Apply button when the parallel-jobs field has an unsaved edit. */
+    .rebuild-apply-dirty { box-shadow: 0 0 0 2px #ffb454; animation: rebuild-apply-pulse 1.4s ease-in-out infinite; }
+    @keyframes rebuild-apply-pulse { 0%, 100% { box-shadow: 0 0 0 2px rgba(255,180,84,0.55); } 50% { box-shadow: 0 0 0 4px rgba(255,180,84,0.9); } }
 
     /* Tables */
     table { width: 100%; border-collapse: collapse; }
@@ -733,6 +736,19 @@
     </div>
   </div>
 
+  <!-- Verification Output Modal -->
+  <div class="modal-overlay" id="verifyModal">
+    <div class="modal" style="max-width: 900px; width: 92%;">
+      <h3 style="margin-bottom:6px;">Migration verification</h3>
+      <p id="verifyStatus" style="font-size:13px; opacity:0.85; margin-bottom:12px;">Running checks…</p>
+      <div class="log-block" id="verifyOutput" style="max-height:62vh;">Starting…</div>
+      <div class="modal-actions" style="margin-top:16px;">
+        <button class="btn btn-secondary" id="verifyRerunBtn" onclick="runVerification()">Re-run</button>
+        <button class="btn" onclick="closeVerifyModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     let lastStatusTime = Date.now();
     let currentPhase = '';
@@ -750,6 +766,11 @@
     let preflightBadTables = [];
     let preflightGeneratedTables = [];
 
+    // Pending (typed-but-not-yet-applied) value for the index-rebuild parallelism
+    // input. Holds the user's edit across the ~2s status poll re-renders so the
+    // field doesn't snap back to the server value before they click Apply.
+    let pendingRebuildWorkers = null;
+
     // ---- Phase helpers ----
     function phaseBadgeClass(phase) {
       switch(phase) {
@@ -757,6 +778,8 @@
         case 'starting': case 'configuring': return 'badge-blue';
         case 'ready_to_copy': return 'badge-blue';
         case 'copying': return 'badge-blue';
+        case 'rebuilding_indexes': return 'badge-blue';
+        case 'index_rebuild_failed': return 'badge-orange';
         case 'replicating': return 'badge-green';
         case 'switched': return 'badge-yellow';
         case 'cleaning_up': return 'badge-orange';
@@ -773,6 +796,8 @@
         case 'starting': case 'configuring': return 'accent-blue';
         case 'ready_to_copy': return 'accent-green';
         case 'copying': return 'accent-blue';
+        case 'rebuilding_indexes': return 'accent-blue';
+        case 'index_rebuild_failed': return 'accent-orange';
         case 'replicating': return 'accent-green';
         case 'switched': return 'accent-yellow';
         case 'cleaning_up': return 'accent-orange';
@@ -808,6 +833,15 @@
           return { tone: 'next-yellow', main: 'Initial copy is paused -- Resume Sync will restart it from the beginning.', sub: 'Bucardo cannot resume a partial copy. Use Abort Migration if you do not want the copy to restart.' };
         }
         return { tone: 'next-blue', main: 'No action needed. Initial copy is in progress.', sub: 'Monitor logs and estimated progress; this can take minutes to hours.' };
+      }
+      if (phase === 'rebuilding_indexes') {
+        const ir = data.index_rebuild || {};
+        const done = (ir.done || 0), total = (ir.rebuildable || 0);
+        return { tone: 'next-blue', main: 'No action needed. Rebuilding indexes before replication resumes.', sub: 'Delta replication is paused until all indexes are rebuilt' + (total ? (' (' + done + '/' + total + ' done).') : '.') };
+      }
+      if (phase === 'index_rebuild_failed') {
+        const ir = data.index_rebuild || {};
+        return { tone: 'next-yellow', main: 'Some indexes failed to rebuild. Fix and retry, or proceed anyway.', sub: (ir.failed || 'Some') + ' index(es) failed. Replication is paused until you decide.' };
       }
       if (phase === 'replicating') {
         if (state === 'paused') {
@@ -987,7 +1021,19 @@
       updateBucardoUI(data.bucardo);
       updatePhaseScopedVisibility(data);
       updateNextActionBanner(data);
+      // Preserve focus/caret in the rebuild-workers input across the guide
+      // re-render so a poll tick doesn't interrupt the user mid-edit.
+      const active = document.activeElement;
+      const wasEditing = active && active.id === 'rebuildWorkersInput';
+      const caret = wasEditing ? active.selectionStart : null;
       updateGuide(data);
+      if (wasEditing) {
+        const again = document.getElementById('rebuildWorkersInput');
+        if (again) {
+          again.focus();
+          try { again.setSelectionRange(caret, caret); } catch (e) {}
+        }
+      }
     }
 
     function setVisibleById(id, visible) {
@@ -1159,6 +1205,120 @@
       return '<div style="margin-top:8px;"><strong>' + title + ':</strong><ul style="margin:8px 0 0 18px;">' + items + '</ul></div>';
     }
 
+    function renderIndexRebuildProgress(ir) {
+      if (!ir) return '';
+      const total = ir.rebuildable || 0;
+      const done = ir.done || 0;
+      const failed = ir.failed || 0;
+      const building = ir.building || 0;
+      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+      let html = '<div class="guide-callout">'
+        + '<strong>Index rebuild progress:</strong> ' + done + ' / ' + total + ' rebuilt'
+        + (building ? (', ' + building + ' in progress') : '')
+        + (failed ? (', <span style="color:#ff455d;">' + failed + ' failed</span>') : '')
+        + (ir.skipped ? (', ' + ir.skipped + ' left in place') : '')
+        + ' (' + pct + '%).';
+      if (Array.isArray(ir.current) && ir.current.length) {
+        html += '<div style="margin-top:6px; font-size:12px; opacity:0.8;">Building now: ' + ir.current.map(escapeHtml).join(', ') + '</div>';
+      }
+      html += '</div>';
+      if (Array.isArray(ir.failed_objects) && ir.failed_objects.length) {
+        html += '<div style="margin-top:8px;"><strong>Failed indexes:</strong><ul style="margin:8px 0 0 18px;">'
+          + ir.failed_objects.map(function (f) {
+              return '<li><code>' + escapeHtml(f.table + '.' + f.name) + '</code> -- ' + escapeHtml(f.error || 'unknown error') + '</li>';
+            }).join('')
+          + '</ul></div>';
+      }
+      return html;
+    }
+
+    // Control + plain-language note for tuning index-rebuild parallelism.
+    function renderRebuildParallelismControl(data, locked) {
+      const cfg = (data && data.rebuild_config) || {};
+      // Deferred index rebuild is turned off (DISABLE_INDEX_DEFERRAL=true): all
+      // indexes stay in place during the copy, so there is nothing to rebuild and
+      // the parallelism / memory tuning does not apply. Show a brief note instead.
+      if (cfg.deferral_disabled) {
+        return ''
+          + '<div class="guide-callout guide-callout-info">'
+          + '<strong>Index deferral is off.</strong> All indexes stay in place during the initial copy '
+          + '(<code>DISABLE_INDEX_DEFERRAL=true</code>), so there is no post-copy index rebuild. '
+          + 'The <code>INDEX_REBUILD_WORKERS</code>, <code>MAINTENANCE_WORK_MEM</code>, and '
+          + '<code>PARALLEL_MAINTENANCE_WORKERS</code> settings do not apply.'
+          + '</div>';
+      }
+      const workers = cfg.workers || 8;
+      const def = cfg.workers_default || 8;
+      const maxw = cfg.max_workers || 100;
+      const mwm = cfg.maintenance_work_mem || '1GB';
+      const isCustom = !!cfg.overridden;
+      // Show the user's in-progress edit (if any) rather than the applied value,
+      // so a poll re-render doesn't reset the field while they're choosing a value.
+      const appliedVal = workers;
+      const hasPending = !locked && pendingRebuildWorkers != null && String(pendingRebuildWorkers) !== String(appliedVal);
+      const shownVal = (!locked && pendingRebuildWorkers != null) ? pendingRebuildWorkers : appliedVal;
+      return ''
+        + '<div class="guide-callout guide-callout-info">'
+        + '<strong>Index rebuild parallelism &mdash; tune for your server.</strong> '
+        + 'After the copy, the dropped indexes are rebuilt in parallel. Choose how many build at the same time:'
+        + '<div style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">'
+        +   '<input id="rebuildWorkersInput" type="number" min="1" max="' + maxw + '" value="' + shownVal + '" data-applied="' + appliedVal + '"' + (locked ? ' disabled' : '')
+        +     ' oninput="onRebuildWorkersInput(this)"'
+        +     ' style="width:84px; padding:6px 8px; background:#111; color:#fafafa; border:1px solid #2b2b2b; border-radius:6px;' + (locked ? ' opacity:0.55;' : '') + '">'
+        +   (locked ? '' : '<button id="rebuildWorkersApplyBtn" class="btn btn-sm ' + (hasPending ? 'btn-primary rebuild-apply-dirty' : 'btn-secondary') + '" onclick="setRebuildWorkers(this)">Apply</button>')
+        +   '<span style="font-size:12px; opacity:0.75;">parallel jobs &middot; ' + (isCustom ? 'custom (default ' + def + ')' : 'default (' + def + ')') + '</span>'
+        + (hasPending ? '<span id="rebuildWorkersHint" style="font-size:12px; color:#ffb454; font-weight:600;">Unsaved &mdash; click Apply</span>' : '')
+        + '</div>'
+        + (locked
+            ? '<div style="margin-top:8px; font-size:12px; opacity:0.8;">&#128274; Locked while the migration is running &mdash; this value will be used when indexes are rebuilt.</div>'
+            : '<div style="margin-top:10px; font-size:12px; opacity:0.85; line-height:1.6;">'
+                + '<strong>How to set it:</strong> keep jobs &le; the number of CPUs on your PlanetScale (target) database.'
+                + '<br><strong>Memory:</strong> each job can use up to ' + mwm + ' (maintenance_work_mem), so plan for about <strong>jobs &times; ' + mwm + '</strong> of peak memory on the target &mdash; keep that within its RAM.'
+                + '<br><strong>To change the per-job memory:</strong> set the <code>MAINTENANCE_WORK_MEM</code> environment variable and restart the tool.'
+              + '</div>')
+        + '</div>';
+    }
+
+    // Track the user's edit and reflect "unsaved" state live (between polls)
+    // without re-rendering the whole guide, which would steal focus.
+    function onRebuildWorkersInput(input) {
+      pendingRebuildWorkers = input.value;
+      const btn = document.getElementById('rebuildWorkersApplyBtn');
+      const hint = document.getElementById('rebuildWorkersHint');
+      const applied = input.getAttribute('data-applied');
+      const dirty = input.value !== '' && String(input.value) !== String(applied);
+      if (btn) {
+        btn.classList.toggle('btn-primary', dirty);
+        btn.classList.toggle('btn-secondary', !dirty);
+        btn.classList.toggle('rebuild-apply-dirty', dirty);
+      }
+      if (hint) hint.style.display = dirty ? '' : 'none';
+    }
+
+    function setRebuildWorkers(btn) {
+      const input = document.getElementById('rebuildWorkersInput');
+      const n = parseInt(input && input.value, 10);
+      if (!Number.isInteger(n) || n < 1 || n > 100) {
+        showActionResult('warning', 'Invalid value', 'Parallel jobs must be a whole number between 1 and 100.');
+        return;
+      }
+      const orig = btn.textContent;
+      btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Saving...';
+      fetch('/set-rebuild-workers?n=' + n, { method: 'POST', credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(d => {
+          btn.disabled = false; btn.textContent = orig;
+          if (d.success) {
+            pendingRebuildWorkers = null; // applied -- stop overriding the server value
+            showActionResult('success', 'Parallelism updated', d.message || ('Set to ' + n + ' parallel jobs.'));
+          } else {
+            showActionResult('error', 'Could not update', d.error || 'Failed to set parallelism.');
+          }
+          refreshStatus();
+        })
+        .catch(() => { btn.disabled = false; btn.textContent = orig; showActionResult('error', 'Could not update', 'Network or server error.'); });
+    }
+
     function updateGuide(data) {
       const card = document.getElementById('guideCard');
       const step = document.getElementById('guideStep');
@@ -1227,6 +1387,7 @@
           + '<li><span class="step-num">3</span><span class="step-text">New changes to Heroku will be tracked and replicated automatically.</span></li>'
           + '</ol>'
           + '<div class="guide-callout guide-callout-info">The data copy will put read load on your Heroku database. For large databases, consider running this during off-peak hours. You can pause sync once the initial copy finishes and replication enters delta mode; pausing during the initial copy itself will cause Bucardo to restart the copy from scratch when you resume.</div>'
+          + renderRebuildParallelismControl(data, false)
           + '<div class="guide-actions"><button class="btn btn-primary" onclick="startCopy(this)">Start Data Copy</button></div>';
         return;
 
@@ -1246,8 +1407,31 @@
             + '<p>Your Heroku app is running normally. For large databases this can take several hours.</p>'
             + '<div class="guide-callout guide-callout-info">You can safely close this page and come back later. The copy will continue in the background.</div>'
             + '<div class="guide-callout guide-callout-info"><strong>Heads up about Pause Sync:</strong> Bucardo cannot resume a partial initial copy. If you pause now, clicking Resume Sync will restart the copy from the beginning. Pausing becomes safe once the dashboard shows "Your databases are in sync".</div>'
+            + renderRebuildParallelismControl(data, true)
             + '<div class="guide-actions"><button class="btn btn-secondary btn-sm" onclick="pauseSync(this)">Pause Sync</button> <button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button></div>';
         }
+
+      } else if (phase === 'rebuilding_indexes') {
+        step.textContent = 'Step 3 of 6';
+        setGuideIndicator('spinner');
+        title.textContent = 'Rebuilding indexes';
+        body.innerHTML = '<p>The initial copy is complete. To make the copy fast, secondary and unique indexes were dropped before copying and are now being rebuilt in parallel (' + (((data.rebuild_config)||{}).workers || 8) + ' jobs at a time). Delta replication is <strong>paused</strong> and will resume automatically once every index is back in place.</p>'
+          + '<div class="guide-callout guide-callout-info">No data is at risk -- the copy is committed. You can safely close this page; rebuilding continues in the background.</div>'
+          + renderIndexRebuildProgress(data.index_rebuild)
+          + '<div class="guide-actions"><button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button></div>';
+
+      } else if (phase === 'index_rebuild_failed') {
+        step.textContent = 'Step 3 of 6';
+        setGuideIndicator('none');
+        title.textContent = 'Some indexes failed to rebuild';
+        body.innerHTML = '<div class="guide-callout guide-callout-error"><strong>One or more indexes failed to rebuild.</strong> Delta replication is paused so you can fix the problem before it resumes. The rest of the indexes were rebuilt successfully.</div>'
+          + renderIndexRebuildProgress(data.index_rebuild)
+          + '<br><br><p>Fix the underlying issue (review the errors above and the logs), then <strong>Retry Failed Indexes</strong>. Or, if you understand the impact, <strong>Proceed Anyway</strong> -- replication will resume and you can add those indexes manually after migration.</p>'
+          + '<div class="guide-actions">'
+          + '<button class="btn btn-primary btn-sm" onclick="retryIndexes(this)">Retry Failed Indexes</button> '
+          + '<button class="btn btn-secondary btn-sm" onclick="proceedAfterRebuild(this)">Proceed Anyway</button> '
+          + '<button class="btn btn-danger btn-sm" onclick="handleAction(\'abort\', this)">Abort Migration</button>'
+          + '</div>';
 
       } else if (phase === 'replicating') {
         step.textContent = 'Step 4 of 6';
@@ -1296,10 +1480,10 @@
           body.innerHTML = '<p>All your existing data has been copied, and your databases are now in sync. Every new write to your Heroku database is being replicated to PlanetScale in real-time.</p>'
             + '<p>Your Heroku app is running normally. When you\'re ready to switch over to PlanetScale, follow these steps:</p>'
             + '<ol class="guide-checklist">'
-            + '<li><span class="step-num">1</span><span class="step-text"><strong>Optional verification.</strong> Validate critical tables with sampled checks, key-range spot checks, and application smoke tests.</span></li>'
-            + '<li><span class="step-num">2</span><span class="step-text"><strong>Have your PlanetScale connection string ready.</strong> You\'ll need it to update your app\'s <code>DATABASE_URL</code> in the next step.</span></li>'
-            + '<li><span class="step-num">3</span><span class="step-text"><strong>Plan for a brief cutover window.</strong> When you click "Switch Traffic," writes to Heroku will be blocked. Your app will still be able to read data, but inserts, updates, and deletes will fail until you point your app to PlanetScale.</span></li>'
-            + '<li><span class="step-num">4</span><span class="step-text"><strong>Click "Switch Traffic"</strong> when you\'re ready to begin the cutover.</span></li>'
+            + '<li><span class="step-num">1</span><span class="step-text"><strong>Have your PlanetScale connection string ready.</strong> You\'ll need it to update your app\'s <code>DATABASE_URL</code> in the next step.</span></li>'
+            + '<li><span class="step-num">2</span><span class="step-text"><strong>Plan for a brief cutover window.</strong> When you click "Switch Traffic," writes to Heroku will be blocked. Your app will still be able to read data, but inserts, updates, and deletes will fail until you point your app to PlanetScale.</span></li>'
+            + '<li><span class="step-num">3</span><span class="step-text"><strong>Click "Switch Traffic"</strong> when you\'re ready to begin the cutover.</span></li>'
+            + '<li><span class="step-num">4</span><span class="step-text"><strong>Verify after cutover.</strong> Full source-vs-target verification (including exact row counts) becomes available <em>after</em> you switch traffic &mdash; once Heroku writes are frozen, the databases can fully match. Running it now, while writes are still flowing, would report spurious differences.</span></li>'
             + '</ol>'
             + readinessCallout
             + '<div class="guide-actions">'
@@ -1320,11 +1504,13 @@
           + '</ol>'
           + '<div class="guide-code">heroku config:set DATABASE_URL="your-planetscale-connection-string" -a your-app-name</div>'
           + '<ol class="guide-checklist" start="2">'
-          + '<li><span class="step-num">2</span><span class="step-text"><strong>Verify your app is working.</strong> Your app will restart automatically. Test key functionality to confirm it\'s reading and writing to PlanetScale correctly.</span></li>'
-          + '<li><span class="step-num">3</span><span class="step-text"><strong>If something went wrong,</strong> click "Revert Switch" to restore write access to Heroku while you troubleshoot. This is safe and can be done at any time.</span></li>'
-          + '<li><span class="step-num">4</span><span class="step-text"><strong>Once everything looks good,</strong> click "Complete Migration" to clean up replication and finish the migration.</span></li>'
+          + '<li><span class="step-num">2</span><span class="step-text"><strong>Verify the migration.</strong> Click <strong>Verify Migration</strong> for a full source-vs-target check. Writes to Heroku are blocked now, so the source is frozen &mdash; this is the most reliable time to confirm every row and object matches.</span></li>'
+          + '<li><span class="step-num">3</span><span class="step-text"><strong>Verify your app is working.</strong> Your app will restart automatically. Test key functionality to confirm it\'s reading and writing to PlanetScale correctly.</span></li>'
+          + '<li><span class="step-num">4</span><span class="step-text"><strong>If something went wrong,</strong> click "Revert Switch" to restore write access to Heroku while you troubleshoot. This is safe and can be done at any time.</span></li>'
+          + '<li><span class="step-num">5</span><span class="step-text"><strong>Once everything looks good,</strong> click "Complete Migration" to clean up replication and finish the migration.</span></li>'
           + '</ol>'
           + '<div class="guide-actions">'
+          + '<button class="btn btn-secondary" onclick="runVerification()">Verify Migration</button>'
           + '<button class="btn btn-secondary" onclick="handleAction(\'revertSwitch\', this)">Revert Switch</button>'
           + '<button class="btn btn-danger" onclick="handleAction(\'cleanup\', this)">Complete Migration</button>'
           + '</div>';
@@ -1353,7 +1539,10 @@
         body.innerHTML = '<p>The migration was aborted and all Bucardo replication triggers have been removed from your Heroku database. No data was migrated to PlanetScale.</p>'
           + '<p>Your Heroku database is unchanged and your app is still running normally on Heroku.</p>'
           + '<p>We recommend running <code>ANALYZE</code> on your Heroku database to refresh query plan statistics after trigger removal.</p>'
-          + '<p>You can safely delete this migration app when ready.</p>';
+          + '<div class="guide-callout guide-callout-info">Want to try again? Click <strong>Start a New Migration</strong> to reset the dashboard — no container restart needed. First make sure your PlanetScale target database is empty (re-create it, or drop the tables left from this attempt), since the new run copies the schema fresh.</div>'
+          + '<div class="guide-actions">'
+          + '<button class="btn btn-primary" onclick="startOver(this)">Start a New Migration</button>'
+          + '</div>';
 
       } else if (phase === 'error') {
         step.textContent = '';
@@ -1488,6 +1677,52 @@
         });
     }
 
+    function retryIndexes(btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner spinner-dark"></span> Retrying...';
+      fetch('/retry-indexes', { method: 'POST', credentials: 'same-origin' })
+        .then(r => r.json())
+        .then((data) => {
+          if (data.success) {
+            showActionResult('success', 'Retrying failed indexes', data.message || 'Rebuilding failed indexes.');
+          } else {
+            btn.disabled = false;
+            btn.textContent = 'Retry Failed Indexes';
+            showActionResult('error', 'Retry failed', data.message || data.error || 'Could not retry index rebuild.');
+          }
+          refreshStatus();
+        })
+        .catch(err => {
+          btn.disabled = false;
+          btn.textContent = 'Retry Failed Indexes';
+          console.error(err);
+          showActionResult('error', 'Retry failed', 'Network or server error while retrying indexes.');
+        });
+    }
+
+    function proceedAfterRebuild(btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Resuming...';
+      fetch('/proceed-after-rebuild', { method: 'POST', credentials: 'same-origin' })
+        .then(r => r.json())
+        .then((data) => {
+          if (data.success) {
+            showActionResult('success', 'Replication resumed', data.message || 'Proceeding to replication.');
+          } else {
+            btn.disabled = false;
+            btn.textContent = 'Proceed Anyway';
+            showActionResult('error', 'Could not proceed', data.message || data.error || 'Failed to resume replication.');
+          }
+          refreshStatus();
+        })
+        .catch(err => {
+          btn.disabled = false;
+          btn.textContent = 'Proceed Anyway';
+          console.error(err);
+          showActionResult('error', 'Could not proceed', 'Network or server error while resuming replication.');
+        });
+    }
+
     // ---- Start Copy ----
     function startCopy(btn) {
       btn.disabled = true;
@@ -1541,6 +1776,71 @@
     }
 
     // ---- Retry Migration ----
+    let verifyPollTimer = null;
+    function closeVerifyModal() {
+      document.getElementById('verifyModal').classList.remove('open');
+      if (verifyPollTimer) { clearTimeout(verifyPollTimer); verifyPollTimer = null; }
+    }
+    function runVerification() {
+      const out = document.getElementById('verifyOutput');
+      const status = document.getElementById('verifyStatus');
+      const rerun = document.getElementById('verifyRerunBtn');
+      document.getElementById('verifyModal').classList.add('open');
+      out.textContent = 'Starting verification…';
+      status.innerHTML = '<span class="spinner"></span> Running checks — this can take up to a couple of minutes…';
+      if (rerun) rerun.disabled = true;
+      fetch('/verify', { method: 'POST', credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(() => { if (verifyPollTimer) clearTimeout(verifyPollTimer); pollVerify(); })
+        .catch(() => { status.textContent = 'Could not start verification (network/server error).'; if (rerun) rerun.disabled = false; });
+    }
+    function pollVerify() {
+      fetch('/verify-output', { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(d => {
+          const out = document.getElementById('verifyOutput');
+          const status = document.getElementById('verifyStatus');
+          const rerun = document.getElementById('verifyRerunBtn');
+          if (typeof d.output === 'string' && d.output.length) { out.textContent = d.output; out.scrollTop = out.scrollHeight; }
+          if (d.running) {
+            status.innerHTML = '<span class="spinner"></span> Running checks…';
+            verifyPollTimer = setTimeout(pollVerify, 1500);
+          } else {
+            const label = d.result === 'passed' ? '✅ All checks passed'
+                        : d.result === 'warnings' ? '⚠️ Verified with warnings'
+                        : d.result === 'failed' ? '❌ Differences found'
+                        : 'Done';
+            status.textContent = label + ' — scroll for details.';
+            if (rerun) rerun.disabled = false;
+          }
+        })
+        .catch(() => { verifyPollTimer = setTimeout(pollVerify, 2500); });
+    }
+
+    function startOver(btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner spinner-dark"></span> Resetting...';
+      fetch('/reset', { method: 'POST', credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(data => {
+          if (data.success) {
+            preflightCheckRan = false;
+            preflightChecks.tablesReady = false;
+            showActionResult('success', 'Ready for a new migration', data.message || 'Reset complete.');
+            setTimeout(function () { location.reload(); }, 700);
+          } else {
+            btn.disabled = false;
+            btn.textContent = 'Start a New Migration';
+            showActionResult('error', 'Reset failed', data.error || 'Could not reset the dashboard.');
+          }
+        })
+        .catch(() => {
+          btn.disabled = false;
+          btn.textContent = 'Start a New Migration';
+          showActionResult('error', 'Reset failed', 'Network or server error.');
+        });
+    }
+
     function retryMigration(btn) {
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner spinner-dark"></span> Resetting...';

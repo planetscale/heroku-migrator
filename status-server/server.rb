@@ -15,6 +15,7 @@ require "webrick"
 require "webrick/httpauth"
 require "json"
 require "tmpdir"
+require "tempfile"
 require "fileutils"
 require "net/http"
 require "uri"
@@ -29,11 +30,26 @@ COPY_PROGRESS_FILE = File.join(STATE_DIR, "copy_progress.json")
 SETUP_LOG_FILE = File.join(STATE_DIR, "setup.log")
 BUCARDO_LOG_FILE = "/var/log/bucardo/log.bucardo"
 SCRIPTS_DIR = "/opt/bucardo/scripts"
+VERIFY_FILE = File.join(STATE_DIR, "verify.out")
 
 HEROKU_URL = ENV["HEROKU_URL"]
 PLANETSCALE_URL = ENV["PLANETSCALE_URL"]
 
 PORT = (ENV["PORT"] || 8080).to_i
+
+# ---------------------------------------------------------------------------
+# Deferred index rebuild: drop secondary/unique indexes before the copy
+# (drop-secondary-indexes.sh), rebuild in parallel after, with delta apply paused.
+# ---------------------------------------------------------------------------
+INDEX_REBUILD_WORKERS = ((ENV["INDEX_REBUILD_WORKERS"] || "8").to_i).clamp(1, 100)
+MAINTENANCE_WORK_MEM = ENV["MAINTENANCE_WORK_MEM"] || "1GB"
+PARALLEL_MAINTENANCE_WORKERS = ((ENV["PARALLEL_MAINTENANCE_WORKERS"] || "4").to_i).clamp(0, 32)
+INDEX_DEFERRAL_DISABLED = ENV["DISABLE_INDEX_DEFERRAL"]&.downcase == "true"
+REBUILD_LOG_FILE = File.join(STATE_DIR, "index-rebuild.log")
+# Dashboard-settable override for the number of parallel index builds. Persisted
+# in the state dir so it survives restarts; falls back to INDEX_REBUILD_WORKERS.
+REBUILD_WORKERS_FILE = File.join(STATE_DIR, "rebuild_workers")
+REBUILD_WORKERS_MAX = 100
 
 # ---------------------------------------------------------------------------
 # Slack Notifications (enabled by default, disable with DISABLE_NOTIFICATIONS=true)
@@ -70,6 +86,7 @@ end
 # ---------------------------------------------------------------------------
 def notify_slack(message)
   return unless NOTIFICATIONS_ENABLED
+  return if SLACK_WEBHOOK_URL.empty?
   Thread.new do
     begin
       uri = URI.parse(SLACK_WEBHOOK_URL)
@@ -127,6 +144,15 @@ def check_milestone_notifications(status_data)
     if $last_notified_phase != "copying"
       notify_slack(":arrows_counterclockwise: Data copy started#{branch_tag}")
     end
+  when "rebuilding_indexes"
+    if $last_notified_phase != "rebuilding_indexes"
+      notify_slack(":hammer_and_wrench: Initial copy complete -- rebuilding indexes#{branch_tag}")
+    end
+  when "index_rebuild_failed"
+    if $last_notified_phase != "index_rebuild_failed"
+      failed = status_data.dig("index_rebuild", "failed")
+      notify_slack(":warning: Index rebuild finished with #{failed || 'some'} failure(s) -- replication paused for review#{branch_tag}")
+    end
   when "replicating"
     if $last_notified_phase != "replicating"
       notify_slack(":white_check_mark: Databases in sync#{branch_tag}")
@@ -161,13 +187,17 @@ def ps_migrate_query(sql)
   `psql "#{PLANETSCALE_URL}" -A -t -c "#{sql}" 2>/dev/null`.strip
 end
 
+# Migrator bookkeeping lives in _ps_migrator (not public); removed on
+# Complete/Abort via rm-bucardo-repl.sh.
+MIGRATION_STATE_TABLE = "_ps_migrator.migration_state"
+
 def ensure_migration_state_table
-  ps_migrate_query("CREATE TABLE IF NOT EXISTS _ps_migration_state (id integer PRIMARY KEY DEFAULT 1, phase text NOT NULL, started_at text, switched_at text, completed_at text, error text, updated_at text)")
+  ps_migrate_query("CREATE SCHEMA IF NOT EXISTS _ps_migrator; CREATE TABLE IF NOT EXISTS #{MIGRATION_STATE_TABLE} (id integer PRIMARY KEY DEFAULT 1, phase text NOT NULL, started_at text, switched_at text, completed_at text, error text, updated_at text)")
 end
 
 def read_persistent_state
   return nil unless PLANETSCALE_URL
-  row = ps_migrate_query("SELECT phase, started_at, switched_at, completed_at, error FROM _ps_migration_state WHERE id = 1")
+  row = ps_migrate_query("SELECT phase, started_at, switched_at, completed_at, error FROM #{MIGRATION_STATE_TABLE} WHERE id = 1")
   return nil if row.empty?
   parts = row.split("|", -1)
   return nil if parts.length < 5
@@ -185,7 +215,7 @@ def write_persistent_state(phase, extras = {})
   error_val = extras[:error]&.gsub("'", "''") || ""
   started = extras[:started_at] || now
 
-  ps_migrate_query("INSERT INTO _ps_migration_state (id, phase, started_at, switched_at, completed_at, error, updated_at) VALUES (1, '#{phase}', '#{started}', #{switched == 'NULL' ? 'NULL' : "'#{switched}'"}, #{completed == 'NULL' ? 'NULL' : "'#{completed}'"}, '#{error_val}', '#{now}') ON CONFLICT (id) DO UPDATE SET phase = '#{phase}', switched_at = #{switched == 'NULL' ? 'NULL' : "'#{switched}'"}, completed_at = #{completed == 'NULL' ? 'NULL' : "'#{completed}'"}, error = '#{error_val}', updated_at = '#{now}'")
+  ps_migrate_query("INSERT INTO #{MIGRATION_STATE_TABLE} (id, phase, started_at, switched_at, completed_at, error, updated_at) VALUES (1, '#{phase}', '#{started}', #{switched == 'NULL' ? 'NULL' : "'#{switched}'"}, #{completed == 'NULL' ? 'NULL' : "'#{completed}'"}, '#{error_val}', '#{now}') ON CONFLICT (id) DO UPDATE SET phase = '#{phase}', switched_at = #{switched == 'NULL' ? 'NULL' : "'#{switched}'"}, completed_at = #{completed == 'NULL' ? 'NULL' : "'#{completed}'"}, error = '#{error_val}', updated_at = '#{now}'")
 rescue => e
   $stderr.puts "Failed to write persistent state: #{e.message}"
 end
@@ -201,14 +231,10 @@ rescue JSON::ParserError
 end
 
 def get_bucardo_status
-  tmp_dir = Dir.mktmpdir
-  status_file = File.join(tmp_dir, "status.out")
+  # Capture stdout directly; Dir.mktmpdir can fail on a non-sticky /tmp.
+  raw = `bucardo status planetscale_import 2>/dev/null`
 
-  system("bucardo status planetscale_import > #{status_file} 2>/dev/null")
-
-  return nil unless File.exist?(status_file)
-  raw = File.read(status_file)
-  return nil if raw.strip.empty?
+  return nil if raw.nil? || raw.strip.empty?
 
   result = { "raw" => raw }
 
@@ -234,11 +260,8 @@ def get_bucardo_status
     when /^Onetimecopy\s+:\s+(.+)/
       copy_raw = $1.strip
       result["initial_copy_phase_raw"] = copy_raw
-      result["initial_copy_phase"] = case copy_raw
-      when "Yes" then "in-progress"
-      when "No" then "finished"
-      else "unknown"
-      end
+      # "Yes" => copy still running; anything else (incl. "No") => finished.
+      result["initial_copy_phase"] = copy_raw.match?(/\AYes\b/i) ? "in-progress" : "finished"
     when /^Rows deleted\/inserted\s+:\s+([\d,]+)\s+\/\s+([\d,]+)/
       deleted = $1.to_s.delete(",").to_i
       inserted = $2.to_s.delete(",").to_i
@@ -257,11 +280,20 @@ def get_bucardo_status
     end
   end
 
+  # No Onetimecopy line (some builds drop it when done): a sync with a real
+  # current state has finished its initial copy.
+  if result["initial_copy_phase"].nil?
+    result["initial_copy_phase"] =
+      if result["current_state"] && result["current_state"] != "not-yet-started"
+        "finished"
+      else
+        "unknown"
+      end
+  end
+
   result
 rescue StandardError => e
   { "error" => e.message }
-ensure
-  FileUtils.rm_rf(tmp_dir) if defined?(tmp_dir) && tmp_dir
 end
 
 def read_copy_progress_file
@@ -501,7 +533,8 @@ def build_event_checklist(phase:, copy_phase:, readiness:, lag_health:)
     { "id" => "schema_copied", "label" => "Schema copied", "status" => ["ready_to_copy", "copying", "replicating", "switched", "cleaning_up", "completed"].include?(phase) ? "complete" : "pending" },
     { "id" => "replication_configured", "label" => "Replication configured", "status" => ["ready_to_copy", "copying", "replicating", "switched", "cleaning_up", "completed"].include?(phase) ? "complete" : "pending" },
     { "id" => "initial_copy_running", "label" => "Initial copy running", "status" => copy_phase == "in-progress" ? "current" : (["replicating", "switched", "cleaning_up", "completed"].include?(phase) ? "complete" : "pending") },
-    { "id" => "initial_copy_complete", "label" => "Initial copy complete", "status" => (copy_phase == "finished" || ["replicating", "switched", "cleaning_up", "completed"].include?(phase)) ? "complete" : "pending" },
+    { "id" => "initial_copy_complete", "label" => "Initial copy complete", "status" => (copy_phase == "finished" || ["rebuilding_indexes", "index_rebuild_failed", "replicating", "switched", "cleaning_up", "completed"].include?(phase)) ? "complete" : "pending" },
+    { "id" => "indexes_rebuilt", "label" => INDEX_DEFERRAL_DISABLED ? "Indexes in place" : "Indexes rebuilt", "status" => phase == "rebuilding_indexes" ? "current" : (phase == "index_rebuild_failed" ? "current" : (["replicating", "switched", "cleaning_up", "completed"].include?(phase) ? "complete" : "pending")) },
     { "id" => "replication_healthy", "label" => "Replication healthy", "status" => replication_healthy ? "complete" : (["replicating", "switched", "cleaning_up", "completed"].include?(phase) ? "current" : "pending") },
   ]
 
@@ -785,13 +818,276 @@ def ensure_sync_for_copy_start
 end
 
 # Runs rm-bucardo-repl.sh to deregister the Heroku/PlanetScale databases from
-# Bucardo's catalog and remove replication triggers. Used by /cleanup, /abort,
-# and /retry so a failed attempt never leaves a stale catalog entry behind.
-# Returns [success, output].
+# Bucardo's catalog and remove replication triggers. 
 def run_bucardo_teardown
   output = `sh #{SCRIPTS_DIR}/rm-bucardo-repl.sh --primary "#{HEROKU_URL}" --replica "#{PLANETSCALE_URL}" 2>&1`
   [$?.success?, output]
 end
+
+# ---------------------------------------------------------------------------
+# Deferred index rebuild orchestrator
+#
+# After the initial copy completes, delta apply is paused and the indexes that
+# were dropped before the copy (recorded in _ps_migrator.dropped_indexes) are
+# rebuilt in parallel. Pass 1 = secondary indexes + unique constraints; pass 2 =
+# dependent foreign keys (recreated only after their uniques exist again). One
+# failure never aborts the run; failures are surfaced only at the very end.
+# ---------------------------------------------------------------------------
+$index_rebuild_mutex = Mutex.new
+$index_rebuild_running = false
+
+# Verification run state (drives the dashboard "Run verification" modal).
+$verify_mutex = Mutex.new
+$verify_running = false
+$verify_exit = nil
+
+def sql_escape(value)
+  value.to_s.gsub("'", "''")
+end
+
+def log_rebuild(message)
+  line = "[#{Time.now.utc.iso8601}] #{message}"
+  $stderr.puts "index-rebuild: #{message}"
+  File.open(REBUILD_LOG_FILE, "a") { |f| f.puts(line) }
+rescue StandardError
+  nil
+end
+
+# Returns aggregate counts from the rebuild registry, or nil if the registry does
+# not exist (deferral disabled, or no indexes were dropped).
+def index_rebuild_stats
+  return nil unless PLANETSCALE_URL
+  row = ps_migrate_query(
+    "SELECT " \
+    "count(*) FILTER (WHERE status='pending'), " \
+    "count(*) FILTER (WHERE status='building'), " \
+    "count(*) FILTER (WHERE status='done'), " \
+    "count(*) FILTER (WHERE status='failed'), " \
+    "count(*) FILTER (WHERE status='skipped'), " \
+    "count(*) " \
+    "FROM _ps_migrator.dropped_indexes"
+  )
+  return nil if row.nil? || row.empty?
+  p = row.split("|", -1)
+  return nil if p.length < 6
+  pending, building, done, failed, skipped, total = p.map(&:to_i)
+  {
+    "pending" => pending, "building" => building, "done" => done,
+    "failed" => failed, "skipped" => skipped, "total" => total,
+    # Rebuildable = everything we actually intend to (re)create (excludes skipped).
+    "rebuildable" => total - skipped,
+  }
+rescue StandardError
+  nil
+end
+
+# Full status block for /status, including currently-building and failed objects.
+def index_rebuild_detail
+  stats = index_rebuild_stats
+  return nil unless stats
+
+  building = ps_migrate_query(
+    "SELECT string_agg(tablename || '.' || objectname, '|' ORDER BY size_bytes DESC NULLS LAST) " \
+    "FROM _ps_migrator.dropped_indexes WHERE status='building'"
+  ).to_s.split("|").reject(&:empty?)
+
+  failed_raw = `psql "#{PLANETSCALE_URL}" -A -t -F'\x1f' -c "SELECT tablename, objectname, replace(replace(coalesce(error,''), chr(10), ' '), chr(13), ' ') FROM _ps_migrator.dropped_indexes WHERE status='failed' ORDER BY tablename, objectname" 2>/dev/null`
+  failed = failed_raw.each_line.map do |line|
+    cols = line.chomp.split("\x1f", -1)
+    next nil if cols.length < 3
+    { "table" => cols[0], "name" => cols[1], "error" => cols[2].slice(0, 400) }
+  end.compact
+
+  stats.merge(
+    "running" => $index_rebuild_running,
+    "current" => building,
+    "failed_objects" => failed,
+  )
+rescue StandardError
+  nil
+end
+
+# True if there is real rebuild work recorded. Note: this intentionally does NOT
+# consult DISABLE_INDEX_DEFERRAL -- that flag governs whether indexes get DROPPED
+# (in drop-secondary-indexes.sh). If a registry with unfinished work exists, those
+# indexes were already dropped and MUST be rebuilt regardless of the flag.
+def index_rebuild_pending?
+  stats = index_rebuild_stats
+  return false unless stats
+  stats["rebuildable"] > 0 && (stats["pending"] + stats["building"] + stats["failed"]) > 0
+end
+
+# Atomically claim the next index for a pass. Returns its id, or nil if none left.
+# Claims ONLY 'pending' rows: a row that fails becomes 'failed' (terminal for this
+# run) and must NOT be re-claimed, otherwise a permanently-failing index would be
+# retried forever and the pass would never drain. /retry-indexes resets 'failed'
+# back to 'pending' to re-attempt them as a fresh run.
+def claim_next_index(pass)
+  out = ps_migrate_query(
+    "WITH c AS (" \
+    "  SELECT id FROM _ps_migrator.dropped_indexes " \
+    "  WHERE pass=#{pass} AND status = 'pending' " \
+    "  ORDER BY size_bytes DESC NULLS LAST, id " \
+    "  FOR UPDATE SKIP LOCKED LIMIT 1" \
+    ") UPDATE _ps_migrator.dropped_indexes d SET status='building', started_at=now() " \
+    "FROM c WHERE d.id = c.id RETURNING d.id"
+  )
+  id = out.to_s.each_line.map(&:strip).find { |l| l.match?(/\A\d+\z/) }
+  id && id.to_i
+end
+
+def rebuild_one_index(id)
+  meta_raw = `psql "#{PLANETSCALE_URL}" -A -t -F'\x1f' -c "SELECT tablename, objectname, kind FROM _ps_migrator.dropped_indexes WHERE id=#{id}" 2>/dev/null`
+  table, name, kind = meta_raw.chomp.split("\x1f", -1)
+  rebuild_sql = `psql "#{PLANETSCALE_URL}" -A -t -c "SELECT rebuild_sql FROM _ps_migrator.dropped_indexes WHERE id=#{id}" 2>/dev/null`.strip
+
+  if rebuild_sql.empty?
+    ps_migrate_query("UPDATE _ps_migrator.dropped_indexes SET status='failed', finished_at=now(), error='rebuild_sql was empty' WHERE id=#{id}")
+    log_rebuild("FAILED #{table}.#{name}: rebuild_sql empty")
+    return
+  end
+
+  started = Time.now
+  log_rebuild("BUILD  #{table}.#{name} (#{kind}) starting")
+
+  script = +"SET statement_timeout = 0;\n"
+  script << "SET maintenance_work_mem = '#{MAINTENANCE_WORK_MEM}';\n"
+  script << "SET max_parallel_maintenance_workers = #{PARALLEL_MAINTENANCE_WORKERS};\n"
+  script << rebuild_sql
+  script << ";\n"
+
+  output = ""
+  Tempfile.create(["ps_rebuild", ".sql"]) do |f|
+    f.write(script)
+    f.flush
+    output = `psql "#{PLANETSCALE_URL}" -v ON_ERROR_STOP=1 -f "#{f.path}" 2>&1`
+  end
+  ok = $?.success?
+  elapsed = (Time.now - started).round(1)
+
+  if ok
+    ps_migrate_query("UPDATE _ps_migrator.dropped_indexes SET status='done', finished_at=now(), error=NULL WHERE id=#{id}")
+    log_rebuild("DONE   #{table}.#{name} in #{elapsed}s")
+  else
+    err = output.to_s.strip.split("\n").last(4).join(" ").slice(0, 480)
+    ps_migrate_query("UPDATE _ps_migrator.dropped_indexes SET status='failed', finished_at=now(), error='#{sql_escape(err)}' WHERE id=#{id}")
+    log_rebuild("FAILED #{table}.#{name} after #{elapsed}s: #{err}")
+  end
+rescue StandardError => e
+  ps_migrate_query("UPDATE _ps_migrator.dropped_indexes SET status='failed', finished_at=now(), error='#{sql_escape(e.message)}' WHERE id=#{id}") rescue nil
+  log_rebuild("FAILED id=#{id}: #{e.message}")
+end
+
+# Number of parallel index builds to use: a dashboard override (persisted in the
+# state dir) wins over the INDEX_REBUILD_WORKERS env default, so it can be tuned
+# per server without a redeploy.
+def effective_rebuild_workers
+  if File.exist?(REBUILD_WORKERS_FILE)
+    n = File.read(REBUILD_WORKERS_FILE).to_i
+    return n.clamp(1, REBUILD_WORKERS_MAX) if n > 0
+  end
+  INDEX_REBUILD_WORKERS
+rescue StandardError
+  INDEX_REBUILD_WORKERS
+end
+
+# Run all objects for a pass with `effective_rebuild_workers` parallel workers. The
+# DB (FOR UPDATE SKIP LOCKED) is the work queue, so workers never collide.
+def rebuild_pass(pass)
+  workers = Array.new(effective_rebuild_workers) do
+    Thread.new do
+      loop do
+        id = claim_next_index(pass)
+        break unless id
+        rebuild_one_index(id)
+      end
+    end
+  end
+  workers.each(&:join)
+end
+
+# Launch (or resume) the rebuild. Pauses delta apply, rebuilds all passes, then
+# either resumes delta apply (all good) or holds in index_rebuild_failed.
+def start_index_rebuild(started_at)
+  $index_rebuild_mutex.synchronize do
+    return if $index_rebuild_running
+    $index_rebuild_running = true
+  end
+
+  Thread.new do
+    begin
+      log_rebuild("=== Index rebuild started (workers=#{effective_rebuild_workers}, maintenance_work_mem=#{MAINTENANCE_WORK_MEM}) ===")
+
+      # Hold delta apply until every index is back in place.
+      `bucardo pause planetscale_import 2>&1`
+
+      File.write(STATUS_FILE, JSON.generate({
+        phase: "rebuilding_indexes",
+        state: "rebuilding",
+        message: "Initial copy complete. Rebuilding indexes before replication resumes...",
+        error: nil,
+        started_at: started_at,
+      }))
+      write_persistent_state("rebuilding_indexes", started_at: started_at)
+
+      # Recover orphaned claims: a row left 'building' means a worker was
+      # interrupted (crash/restart) before finishing. Reset it to 'pending' so it
+      # is re-attempted (and so the run can't mistake it for a success). Safe here
+      # because the mutex guarantees no workers are running yet.
+      ps_migrate_query("UPDATE _ps_migrator.dropped_indexes SET status='pending' WHERE status='building'")
+
+      # Order by real (now-populated) target table sizes: biggest work first.
+      ps_migrate_query(
+        "UPDATE _ps_migrator.dropped_indexes d SET size_bytes = " \
+        "pg_total_relation_size((quote_ident(d.schemaname) || '.' || quote_ident(d.tablename))::regclass) " \
+        "WHERE status = 'pending'"
+      )
+
+      rebuild_pass(1)
+      rebuild_pass(2)
+
+      stats = index_rebuild_stats
+      failed = stats ? stats["failed"] : 0
+
+      if failed.to_i > 0
+        log_rebuild("=== Index rebuild finished with #{failed} failure(s); holding for user ===")
+        File.write(STATUS_FILE, JSON.generate({
+          phase: "index_rebuild_failed",
+          state: "rebuild_failed",
+          message: "#{failed} index(es) failed to rebuild. Delta replication is paused. Fix and retry, or proceed anyway.",
+          error: nil,
+          started_at: started_at,
+        }))
+        write_persistent_state("index_rebuild_failed", started_at: started_at)
+      else
+        log_rebuild("=== Index rebuild complete; resuming delta apply ===")
+        `bucardo resume planetscale_import 2>&1`
+        `bucardo kick planetscale_import 0 2>&1`
+        File.write(STATUS_FILE, JSON.generate({
+          phase: "replicating",
+          state: "running",
+          message: "Indexes rebuilt. Real-time replication is active.",
+          error: nil,
+          started_at: started_at,
+        }))
+        write_persistent_state("replicating", started_at: started_at)
+      end
+    rescue StandardError => e
+      log_rebuild("ERROR orchestrator: #{e.message}")
+      File.write(STATUS_FILE, JSON.generate({
+        phase: "index_rebuild_failed",
+        state: "rebuild_error",
+        message: "Index rebuild encountered an error. Delta replication is paused.",
+        error: e.message.to_s.slice(0, 500),
+        started_at: started_at,
+      }))
+      write_persistent_state("index_rebuild_failed", started_at: started_at, error: e.message.to_s.slice(0, 500))
+    ensure
+      $index_rebuild_mutex.synchronize { $index_rebuild_running = false }
+    end
+  end
+end
+
 
 # ---------------------------------------------------------------------------
 # Server setup
@@ -870,17 +1166,26 @@ server.mount_proc "/status" do |req, res|
 
     if combined["phase"] == "copying"
       if copy_phase == "finished" && bucardo_healthy_for_replication?(bucardo_status)
-        File.write(STATUS_FILE, JSON.generate({
-          phase: "replicating",
-          state: "running",
-          message: "Initial copy complete. Real-time replication is active.",
-          error: nil,
-          started_at: started_at,
-        }))
-        write_persistent_state("replicating", started_at: started_at)
-        combined["phase"] = "replicating"
-        combined["state"] = "running"
-        combined["message"] = "Initial copy complete. Real-time replication is active."
+        if index_rebuild_pending?
+          # Rebuild deferred indexes first; reflect the phase now so concurrent
+          # /status polls don't retrigger the copy->replicate path.
+          start_index_rebuild(started_at)
+          combined["phase"] = "rebuilding_indexes"
+          combined["state"] = "rebuilding"
+          combined["message"] = "Initial copy complete. Rebuilding indexes before replication resumes..."
+        else
+          File.write(STATUS_FILE, JSON.generate({
+            phase: "replicating",
+            state: "running",
+            message: "Initial copy complete. Real-time replication is active.",
+            error: nil,
+            started_at: started_at,
+          }))
+          write_persistent_state("replicating", started_at: started_at)
+          combined["phase"] = "replicating"
+          combined["state"] = "running"
+          combined["message"] = "Initial copy complete. Real-time replication is active."
+        end
       elsif copy_phase == "finished"
         combined["state"] = "copy_health_check_failed"
         combined["message"] = "Initial copy appears complete, but replication health checks are not passing yet."
@@ -889,7 +1194,29 @@ server.mount_proc "/status" do |req, res|
         combined["message"] = "Copy status is ambiguous after Bucardo restart/output change. Waiting for a clear copy completion signal."
       end
     end
+
+    # Resume the rebuild orchestrator if a restart interrupted it mid-rebuild.
+    if combined["phase"] == "rebuilding_indexes" && !$index_rebuild_running && index_rebuild_pending?
+      start_index_rebuild(started_at)
+    end
   end
+
+  # Attach rebuild progress whenever a registry exists (drives the dashboard).
+  if ["copying", "rebuilding_indexes", "index_rebuild_failed", "replicating"].include?(combined["phase"])
+    detail = index_rebuild_detail
+    combined["index_rebuild"] = detail if detail
+  end
+
+  # Current index-rebuild parallelism config (drives the dashboard tuning control).
+  combined["rebuild_config"] = {
+    "workers" => effective_rebuild_workers,
+    "workers_default" => INDEX_REBUILD_WORKERS,
+    "overridden" => File.exist?(REBUILD_WORKERS_FILE),
+    "parallel_maintenance_workers" => PARALLEL_MAINTENANCE_WORKERS,
+    "maintenance_work_mem" => MAINTENANCE_WORK_MEM,
+    "max_workers" => REBUILD_WORKERS_MAX,
+    "deferral_disabled" => INDEX_DEFERRAL_DISABLED,
+  }
 
   combined["cutover_readiness"] = build_cutover_readiness(
     phase: combined["phase"],
@@ -941,6 +1268,9 @@ server.mount_proc "/start-migration" do |req, res|
 
   started_at = Time.now.utc.iso8601
   FileUtils.rm_f(COPY_PROGRESS_FILE)
+  # Start each migration from the configured default parallelism; the dashboard
+  # control writes a fresh per-migration override at the ready_to_copy step.
+  FileUtils.rm_f(REBUILD_WORKERS_FILE)
 
   # Update local status
   File.write(STATUS_FILE, JSON.generate({
@@ -1160,6 +1490,108 @@ server.mount_proc "/resume-sync" do |req, res|
   res.body = JSON.generate({ success: success, output: output.strip })
 end
 
+# POST /retry-indexes - re-run the rebuild over failed indexes only (after the
+# user has fixed whatever caused them to fail). Only valid while held.
+server.mount_proc "/retry-indexes" do |req, res|
+  require_auth(req, res)
+
+  unless req.request_method == "POST"
+    res.status = 405
+    res.content_type = "application/json"
+    res.body = JSON.generate({ error: "Method not allowed" })
+    next
+  end
+
+  res.content_type = "application/json"
+
+  current = read_status_file
+  unless current["phase"] == "index_rebuild_failed"
+    res.status = 409
+    res.body = JSON.generate({ success: false, error: "Retry is only available while index rebuild is held (current phase: #{current["phase"]})." })
+    next
+  end
+
+  if $index_rebuild_running
+    res.body = JSON.generate({ success: false, message: "A rebuild is already running." })
+    next
+  end
+
+  # Reset failed rows back to pending so the orchestrator re-attempts them as a
+  # fresh run (claim_next_index only picks 'pending'). If they fail again the run
+  # drains and holds at index_rebuild_failed once more.
+  ps_migrate_query("UPDATE _ps_migrator.dropped_indexes SET status='pending', error=NULL WHERE status='failed'")
+  start_index_rebuild(current["started_at"])
+  res.body = JSON.generate({ success: true, message: "Retrying failed indexes." })
+end
+
+# POST /proceed-after-rebuild - knowingly continue to replication while some
+# indexes remain failed (those tables will seq-scan during delta apply until the
+# index is added manually). Only valid while held.
+server.mount_proc "/proceed-after-rebuild" do |req, res|
+  require_auth(req, res)
+
+  unless req.request_method == "POST"
+    res.status = 405
+    res.content_type = "application/json"
+    res.body = JSON.generate({ error: "Method not allowed" })
+    next
+  end
+
+  res.content_type = "application/json"
+
+  current = read_status_file
+  unless current["phase"] == "index_rebuild_failed"
+    res.status = 409
+    res.body = JSON.generate({ success: false, error: "Not in index_rebuild_failed phase (current: #{current["phase"]})." })
+    next
+  end
+
+  started_at = current["started_at"]
+  resume_output = `bucardo resume planetscale_import 2>&1`
+  `bucardo kick planetscale_import 0 2>&1`
+
+  File.write(STATUS_FILE, JSON.generate({
+    phase: "replicating",
+    state: "running",
+    message: "Proceeding to replication with some indexes unbuilt. Real-time replication is active.",
+    error: nil,
+    started_at: started_at,
+  }))
+  write_persistent_state("replicating", started_at: started_at)
+
+  res.body = JSON.generate({ success: true, message: "Resuming replication.", output: resume_output.strip })
+end
+
+# POST /set-rebuild-workers?n=N - set how many indexes are rebuilt in parallel.
+# Persisted in the state dir; read by the orchestrator when a rebuild starts, so
+# it can be tuned per server without a redeploy. Takes effect on the next rebuild
+# (or the next batch of an ongoing one; already-running workers are not changed).
+server.mount_proc "/set-rebuild-workers" do |req, res|
+  require_auth(req, res)
+  res.content_type = "application/json"
+
+  unless req.request_method == "POST"
+    res.status = 405
+    res.body = JSON.generate({ error: "Method not allowed" })
+    next
+  end
+
+  params = WEBrick::HTTPUtils.parse_query(req.query_string || "")
+  n = (params["n"] || params["workers"]).to_i
+  if n < 1 || n > REBUILD_WORKERS_MAX
+    res.status = 400
+    res.body = JSON.generate({ success: false, error: "Parallel jobs must be an integer between 1 and #{REBUILD_WORKERS_MAX}." })
+    next
+  end
+
+  File.write(REBUILD_WORKERS_FILE, n.to_s)
+  res.body = JSON.generate({
+    success: true,
+    workers: n,
+    message: "Index rebuild parallelism set to #{n}. It applies to the next rebuild (and to new work in an in-progress one).",
+  })
+end
+
 # /count-rows is intentionally disabled to avoid expensive full-table scans.
 server.mount_proc "/count-rows" do |req, res|
   require_auth(req, res)
@@ -1348,17 +1780,18 @@ server.mount_proc "/cleanup" do |req, res|
     File.write(STATUS_FILE, JSON.generate({
       phase: success ? "completed" : "error",
       state: success ? "cleanup_complete" : "cleanup_failed",
-      message: success ? "Migration complete. Bucardo replication removed." : "Cleanup failed.",
+      message: success ? "Migration complete. Bucardo replication and target migrator state removed." : "Cleanup failed.",
       error: success ? nil : output,
       started_at: started_at,
       completed_at: completed_at,
     }))
-    write_persistent_state(
-      success ? "completed" : "error",
-      started_at: started_at,
-      completed_at: completed_at,
-      error: success ? nil : output&.slice(0, 500)
-    )
+    # On success the rm script has dropped the _ps_migrator schema (incl. the
+    # migration_state table) from the target -- do NOT write_persistent_state,
+    # which would recreate it and leave an artifact behind. On failure the schema
+    # is still there, so persist the error for restart recovery.
+    unless success
+      write_persistent_state("error", started_at: started_at, completed_at: completed_at, error: output&.slice(0, 500))
+    end
   end
 
   res.body = JSON.generate({ success: true, message: "Cleanup started. Check /status for progress." })
@@ -1425,6 +1858,118 @@ server.mount_proc "/retry" do |req, res|
   res.body = JSON.generate({ success: true, message: "Cleaning up previous attempt. Check /status for progress." })
 end
 
+# POST /reset - return the tool to a fresh "waiting" state after a finished run
+# (aborted / completed / error) so a new migration can be started WITHOUT
+# restarting the container. Drives the "Start a new migration" button.
+server.mount_proc "/reset" do |req, res|
+  require_auth(req, res)
+
+  unless req.request_method == "POST"
+    res.status = 405
+    res.content_type = "application/json"
+    res.body = JSON.generate({ error: "Method not allowed" })
+    next
+  end
+
+  res.content_type = "application/json"
+
+  current = read_status_file
+  allowed_phases = %w[aborted completed error]
+  unless allowed_phases.include?(current["phase"])
+    res.status = 409
+    res.body = JSON.generate({ success: false, error: "Start a new migration is only available after a migration has aborted, completed, or errored (current phase: #{current["phase"]})." })
+    next
+  end
+
+  # Abort/Complete stop the Bucardo daemon; make sure it is running again so the
+  # next migration can configure replication without a container restart.
+  `bucardo start 2>/dev/null || bucardo restart 2>/dev/null`
+
+  # Clear notification de-dupe and stale copy progress so the new run starts clean.
+  $last_notified_phase = nil
+  $last_notified_copy_phase = nil
+  FileUtils.rm_f(COPY_PROGRESS_FILE)
+  # Start each migration from the configured default parallelism; the dashboard
+  # control writes a fresh per-migration override at the ready_to_copy step.
+  FileUtils.rm_f(REBUILD_WORKERS_FILE)
+
+  File.write(STATUS_FILE, JSON.generate({
+    phase: "waiting",
+    state: "ready",
+    message: "Ready to start a new migration.",
+    error: nil,
+  }))
+  write_persistent_state("waiting")
+
+  res.body = JSON.generate({ success: true, message: "Reset complete. Ready to start a new migration." })
+end
+
+# POST /verify - run the source-vs-target verification (scripts/verify-migration.sh)
+# in the background, streaming its output to VERIFY_FILE. Bucardo/migrator metadata
+# is excluded by the script. GET /verify-output polls progress + result.
+server.mount_proc "/verify" do |req, res|
+  require_auth(req, res)
+  res.content_type = "application/json"
+
+  unless req.request_method == "POST"
+    res.status = 405
+    res.body = JSON.generate({ error: "Method not allowed" })
+    next
+  end
+
+  # Only meaningful AFTER cutover: until writes are revoked on Heroku ("switched"),
+  # the source keeps changing and the databases can never fully match, so exact
+  # row-count checks would report spurious differences.
+  current_phase = read_status_file["phase"]
+  unless %w[switched cleaning_up completed].include?(current_phase)
+    res.status = 409
+    res.body = JSON.generate({ success: false, error: "Verification is available after you switch traffic (so the source is frozen and the databases can fully match). Current phase: #{current_phase}." })
+    next
+  end
+
+  started = false
+  $verify_mutex.synchronize do
+    unless $verify_running
+      $verify_running = true
+      $verify_exit = nil
+      started = true
+    end
+  end
+
+  if started
+    Thread.new do
+      begin
+        File.write(VERIFY_FILE, "Verifying migration — comparing source (Heroku) and target (PlanetScale)...\n\n")
+        # Run with bash: the script uses process substitution / $'\t', which the
+        # container's /bin/sh (dash) does not support.
+        system("bash #{SCRIPTS_DIR}/verify-migration.sh >> #{VERIFY_FILE} 2>&1")
+        $verify_exit = $?.exitstatus
+      rescue => e
+        File.open(VERIFY_FILE, "a") { |f| f.puts("\nERROR: #{e.message}") } rescue nil
+        $verify_exit = 2
+      ensure
+        $verify_mutex.synchronize { $verify_running = false }
+      end
+    end
+  end
+
+  res.body = JSON.generate({ success: true, running: true, started: started })
+end
+
+# GET /verify-output - current verification output + running/result state.
+server.mount_proc "/verify-output" do |req, res|
+  require_auth(req, res)
+  res.content_type = "application/json"
+  output = File.exist?(VERIFY_FILE) ? File.read(VERIFY_FILE) : ""
+  result = case $verify_exit
+           when 0 then "passed"
+           when 1 then "warnings"
+           when nil then nil
+           else "failed"
+           end
+  res.body = JSON.generate({ running: $verify_running, exit: $verify_exit, result: result, output: output })
+end
+
 # POST /abort - emergency stop: removes all Bucardo triggers and replication from any active phase
 server.mount_proc "/abort" do |req, res|
   require_auth(req, res)
@@ -1439,7 +1984,7 @@ server.mount_proc "/abort" do |req, res|
   res.content_type = "application/json"
 
   current = read_status_file
-  allowed_phases = %w[configuring ready_to_copy copying replicating error]
+  allowed_phases = %w[configuring ready_to_copy copying rebuilding_indexes index_rebuild_failed replicating error]
   unless allowed_phases.include?(current["phase"])
     res.status = 409
     res.body = JSON.generate({ success: false, error: "Abort is not available in the current phase (#{current["phase"]})." })
@@ -1470,12 +2015,12 @@ server.mount_proc "/abort" do |req, res|
       started_at: started_at,
       completed_at: completed_at,
     }))
-    write_persistent_state(
-      success ? "aborted" : "error",
-      started_at: started_at,
-      completed_at: completed_at,
-      error: success ? nil : output&.slice(0, 500)
-    )
+    # On success the rm script dropped the _ps_migrator schema (incl. migration_state)
+    # from the target -- do NOT recreate it via write_persistent_state. On failure
+    # the schema remains, so persist the error for restart recovery.
+    unless success
+      write_persistent_state("error", started_at: started_at, completed_at: completed_at, error: output&.slice(0, 500))
+    end
   end
 
   res.body = JSON.generate({ success: true, message: "Abort started. Removing triggers and replication. Check /status for progress." })

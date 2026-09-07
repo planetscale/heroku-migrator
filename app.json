@@ -14,6 +14,22 @@
     "PASSWORD": {
       "description": "Password to access the migration dashboard",
       "required": true
+    },
+    "INDEX_REBUILD_WORKERS": {
+      "description": "Number of indexes to rebuild in parallel after the initial copy (default 8). Peak target parallelism is roughly this times PARALLEL_MAINTENANCE_WORKERS.",
+      "required": false
+    },
+    "MAINTENANCE_WORK_MEM": {
+      "description": "maintenance_work_mem applied to each index build, e.g. 1GB (default 1GB). Allocated per concurrent build, so size relative to the target's memory.",
+      "required": false
+    },
+    "PARALLEL_MAINTENANCE_WORKERS": {
+      "description": "max_parallel_maintenance_workers per index build (default 4).",
+      "required": false
+    },
+    "DISABLE_INDEX_DEFERRAL": {
+      "description": "Set to 'true' to keep all indexes in place during the initial copy (disables the drop/rebuild speedup; default 'false'). When 'true', INDEX_REBUILD_WORKERS, MAINTENANCE_WORK_MEM, and PARALLEL_MAINTENANCE_WORKERS have no effect.",
+      "required": false
     }
   },
   "formation": {

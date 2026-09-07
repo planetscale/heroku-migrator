@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 set -e
+# =============================================================================
+# entrypoint.sh -- container start-up.
+#
+# Validates configuration, brings up the local Postgres that holds Bucardo's
+# catalog, starts the status server, and resumes any migration that was in
+# flight before the container restarted. Runs the status server in the
+# foreground so the container lives as long as it does.
+# =============================================================================
 
 echo "=== Bucardo Migration Runner ==="
 echo "Started at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-# Validate required env vars
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 if [ -z "$HEROKU_URL" ]; then
   echo "ERROR: HEROKU_URL environment variable is required"
   exit 1
@@ -20,8 +30,9 @@ if [ -z "$PASSWORD" ]; then
   exit 1
 fi
 
-# Default source TLS behavior too (Heroku URL), for consistency and to avoid
-# certificate-mode mismatches when sslmode is omitted.
+# Default both URLs to sslmode=require when it is omitted, so operators do not
+# have to tweak URL parameters and the two sides cannot end up on different
+# certificate modes.
 if [[ "$HEROKU_URL" != *"sslmode="* ]]; then
   if [[ "$HEROKU_URL" == *"?"* ]]; then
     HEROKU_URL="${HEROKU_URL}&sslmode=require"
@@ -32,9 +43,6 @@ if [[ "$HEROKU_URL" != *"sslmode="* ]]; then
   echo "HEROKU_URL missing sslmode; defaulting to sslmode=require"
 fi
 
-# Default PlanetScale TLS behavior so operators do not need to tweak URL params.
-# - If sslmode is missing, default to sslmode=require.
-# - If strict verification is requested, use the system CA bundle automatically.
 if [[ "$PLANETSCALE_URL" != *"sslmode="* ]]; then
   if [[ "$PLANETSCALE_URL" == *"?"* ]]; then
     PLANETSCALE_URL="${PLANETSCALE_URL}&sslmode=require"
@@ -45,6 +53,7 @@ if [[ "$PLANETSCALE_URL" != *"sslmode="* ]]; then
   echo "PLANETSCALE_URL missing sslmode; defaulting to sslmode=require"
 fi
 
+# Strict verification needs a CA bundle; use the system one.
 if [[ "$PLANETSCALE_URL" == *"sslmode=verify-full"* || "$PLANETSCALE_URL" == *"sslmode=verify-ca"* ]]; then
   if [[ "$PLANETSCALE_URL" != *"sslrootcert="* ]]; then
     if [[ "$PLANETSCALE_URL" == *"?"* ]]; then
@@ -57,20 +66,38 @@ if [[ "$PLANETSCALE_URL" == *"sslmode=verify-full"* || "$PLANETSCALE_URL" == *"s
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# Runtime environment
+# ---------------------------------------------------------------------------
 PGDATA="/opt/bucardo/pgdata"
 PGPORT=5432
 PGSOCKET="/tmp"
 
-# Heroku runs containers as a random non-root UID that may not exist in
-# /etc/passwd. PostgreSQL and Bucardo require a valid user entry, so we
-# add one at runtime if missing.
+# The container may run as a random non-root UID with no /etc/passwd entry,
+# which Postgres and Bucardo both require.
 if ! whoami &>/dev/null; then
   echo "heroku:x:$(id -u):0:Heroku User:/opt/bucardo:/bin/bash" >> /etc/passwd
 fi
 export HOME="/opt/bucardo"
 
+# Private temp dir for all children: Ruby's Dir.tmpdir rejects a
+# world-writable one without the sticky bit, so a 0777 /tmp would break it.
+export TMPDIR="$HOME/tmp"
+export TMP="$TMPDIR"
+mkdir -p "$TMPDIR" 2>/dev/null || true
+chmod 700 "$TMPDIR" 2>/dev/null || true
+if [ ! -w "$TMPDIR" ]; then
+  echo "WARNING: TMPDIR ($TMPDIR) is not writable; falling back to /tmp"
+  export TMPDIR=/tmp
+  export TMP=/tmp
+fi
+
+# Bucardo writes bucardo.restart.reason.txt to the working directory, and would
+# not start from a non-writable one.
+cd "$HOME" || true
+
 # ---------------------------------------------------------------------------
-# Check PlanetScale for existing migration state (survives dyno restarts)
+# Migration state from the target (survives container restarts)
 # ---------------------------------------------------------------------------
 echo "Checking for existing migration state..."
 PERSISTED_PHASE=""
@@ -78,7 +105,7 @@ PERSISTED_STARTED=""
 PERSISTED_SWITCHED=""
 PERSISTED_COMPLETED=""
 
-STATE_ROW=$(psql "$PLANETSCALE_URL" -A -t -c "SELECT phase, started_at, switched_at, completed_at FROM _ps_migration_state WHERE id = 1" 2>/dev/null || echo "")
+STATE_ROW=$(psql "$PLANETSCALE_URL" -A -t -c "SELECT phase, started_at, switched_at, completed_at FROM _ps_migrator.migration_state WHERE id = 1" 2>/dev/null || echo "")
 if [ -n "$STATE_ROW" ]; then
   PERSISTED_PHASE=$(echo "$STATE_ROW" | cut -d'|' -f1)
   PERSISTED_STARTED=$(echo "$STATE_ROW" | cut -d'|' -f2)
@@ -129,6 +156,18 @@ EOF
 {"phase":"ready_to_copy","state":"schema_copied","message":"Schema and replication configured. Ready to start data copy.","error":null,"started_at":"${PERSISTED_STARTED}"}
 EOF
     ;;
+  "rebuilding_indexes")
+    echo "Migration was rebuilding indexes. Will resume the rebuild after infrastructure is back."
+    cat > /opt/bucardo/state/status.json <<EOF
+{"phase":"rebuilding_indexes","state":"resuming","message":"Resuming index rebuild after restart...","error":null,"started_at":"${PERSISTED_STARTED}"}
+EOF
+    ;;
+  "index_rebuild_failed")
+    echo "Migration was holding after index-rebuild failures. Replication stays paused for review."
+    cat > /opt/bucardo/state/status.json <<EOF
+{"phase":"index_rebuild_failed","state":"rebuild_failed","message":"Index rebuild had failures. Replication is paused. Retry or proceed from the dashboard.","error":null,"started_at":"${PERSISTED_STARTED}"}
+EOF
+    ;;
   "copying"|"replicating"|"configuring"|"starting")
     echo "Migration was in '$PERSISTED_PHASE' phase. Will resume replication."
     cat > /opt/bucardo/state/status.json <<EOF
@@ -144,7 +183,7 @@ EOF
 esac
 
 # ---------------------------------------------------------------------------
-# Start the status HTTP server immediately so Heroku sees the port bound
+# Status server -- started first so the platform sees the port bound
 # ---------------------------------------------------------------------------
 echo "Starting status server on port ${PORT:-8080}..."
 ruby /opt/bucardo/status-server/server.rb &
@@ -156,6 +195,12 @@ STATUS_SERVER_PID=$!
 if [ "$PERSISTED_PHASE" != "completed" ] && [ "$PERSISTED_PHASE" != "aborted" ]; then
   # Initialize PostgreSQL at runtime
   if [ ! -f "$PGDATA/PG_VERSION" ]; then
+    # $PGDATA ships owned by root; a non-root uid can't set initdb's required 0700
+    # perms on it, so recreate the empty dir to take ownership first (any uid).
+    if [ ! -O "$PGDATA" ]; then
+      rm -rf "$PGDATA" 2>/dev/null || true
+      mkdir -p "$PGDATA" 2>/dev/null || true
+    fi
     echo "Initializing PostgreSQL data directory..."
     initdb -D "$PGDATA" --auth=trust --no-locale -U "$(whoami 2>/dev/null || echo pg)"
   fi
@@ -190,11 +235,14 @@ RCEOF
   echo "Configuring Bucardo verbose logging..."
   bucardo set log_level=verbose
 
-  # Keep remote database connections alive across infrastructure with aggressive
-  # idle TCP timeouts, such as EC2 network paths.
-  bucardo set tcp_keepalives_idle=60
-  bucardo set tcp_keepalives_interval=10
-  bucardo set tcp_keepalives_count=6
+  # Purge applied deltas aggressively so deltas converge to 0 quickly after writes
+  # are frozen. vac_run is the actual purge interval (default 30s); vac_sleep is the
+  # VAC's internal check granularity.
+  bucardo set vac_run=10 vac_sleep=5
+
+  # TCP keepalives so a silently-dropped long-haul connection can't stall
+  # replication: idle 60s, probe every 10s, drop after 6 failures.
+  bucardo set tcp_keepalives_idle=60 tcp_keepalives_interval=10 tcp_keepalives_count=6
 
   echo "Starting Bucardo daemon..."
   bucardo start || bucardo restart
@@ -216,7 +264,10 @@ EOF
   if [ "$PERSISTED_PHASE" = "replicating" ]; then
     should_skip_initial_copy=1
   elif [ "$PERSISTED_PHASE" = "copying" ]; then
-    if bucardo status planetscale_import 2>/dev/null | awk -F " : " '/^Onetimecopy/ {print $2}' | grep -q "^No$"; then
+    # Onetimecopy "Yes" => copy still running; anything else => done, resume in
+    # delta mode rather than re-copying.
+    ONETIME_COPY=$(bucardo status planetscale_import 2>/dev/null | awk -F " : " '/^Onetimecopy/ {print $2}' | tr -d '[:space:]')
+    if ! echo "$ONETIME_COPY" | grep -qi "^Yes"; then
       echo "Initial copy was already finished before restart; resuming without initial copy."
       should_skip_initial_copy=1
     fi
@@ -226,14 +277,19 @@ EOF
     RESUME_ARGS="--skip-schema --no-initial-copy"
   fi
 
-  if sh /opt/bucardo/scripts/mk-bucardo-repl.sh --primary "$HEROKU_URL" --replica "$PLANETSCALE_URL" $RESUME_ARGS 2>&1 | tee /opt/bucardo/state/setup.log; then
+  # Check the script's exit status.
+  sh /opt/bucardo/scripts/mk-bucardo-repl.sh --primary "$HEROKU_URL" --replica "$PLANETSCALE_URL" $RESUME_ARGS 2>&1 | tee /opt/bucardo/state/setup.log
+  RESUME_RC=${PIPESTATUS[0]}
+  if [ "$RESUME_RC" -eq 0 ]; then
     echo "Replication resumed!"
-    bucardo kick planetscale_import 0
+    bucardo kick planetscale_import 0 || true
 
     if [ "$should_skip_initial_copy" -eq 1 ]; then
-      RESUMED_PHASE="replicating"
-      RESUMED_STATE="running"
-      RESUMED_MESSAGE="Bucardo replication resumed after restart."
+      # Land in "copying" (not "replicating") so the status server can run any
+      # pending deferred index rebuild before promoting.
+      RESUMED_PHASE="copying"
+      RESUMED_STATE="initial_copy_complete"
+      RESUMED_MESSAGE="Initial copy complete. Finalizing replication (rebuilding any deferred indexes)..."
     else
       RESUMED_PHASE="copying"
       RESUMED_STATE="initial_copy"
@@ -245,20 +301,29 @@ EOF
 EOF
   else
     ERROR_MSG=$(tail -5 /opt/bucardo/state/setup.log | tr '\n' ' ' | sed 's/"/\\"/g')
-    cat > /opt/bucardo/state/status.json <<EOF
+    # Missing schema on target: resume uses --skip-schema and can't recover.
+    # User must start a fresh migration so the schema is re-copied.
+    if grep -qi "Could not find schema" /opt/bucardo/state/setup.log; then
+      MISSING_SCHEMA_MSG="The target database is missing one or more schemas from the source (resume does not re-copy the schema). Abort this migration and start a fresh one against a target that does not yet have the schema. Details: ${ERROR_MSG}"
+      cat > /opt/bucardo/state/status.json <<EOF
+{"phase":"error","state":"resume_failed","message":"Cannot resume: target is missing schema(s) present on the source. Start a fresh migration.","error":"${MISSING_SCHEMA_MSG}","started_at":"${PERSISTED_STARTED}"}
+EOF
+    else
+      cat > /opt/bucardo/state/status.json <<EOF
 {"phase":"error","state":"resume_failed","message":"Failed to resume replication after restart.","error":"${ERROR_MSG}","started_at":"${PERSISTED_STARTED}"}
 EOF
-    echo "ERROR: Failed to resume replication."
+    fi
+    echo "ERROR: Failed to resume replication (rc=${RESUME_RC})."
   fi
 fi
 
-# If we were ready_to_copy before restart, rebuild local Bucardo sync metadata.
-# This prevents "No syncs have been created yet" when users click Start Data Copy
-# after dyno restart or release restart.
+# Rebuild the sync metadata if we were ready_to_copy, so Start Data Copy does
+# not fail with "No syncs have been created yet" after a restart.
 if [ "$PERSISTED_PHASE" = "ready_to_copy" ]; then
   if ! bucardo status planetscale_import >/dev/null 2>&1; then
     echo "Reconstructing missing Bucardo sync for ready_to_copy phase..."
-    if sh /opt/bucardo/scripts/mk-bucardo-repl.sh --primary "$HEROKU_URL" --replica "$PLANETSCALE_URL" --skip-schema 2>&1 | tee /opt/bucardo/state/setup.log; then
+    sh /opt/bucardo/scripts/mk-bucardo-repl.sh --primary "$HEROKU_URL" --replica "$PLANETSCALE_URL" --skip-schema 2>&1 | tee /opt/bucardo/state/setup.log
+    if [ "${PIPESTATUS[0]}" -eq 0 ]; then
       bucardo pause planetscale_import >/dev/null 2>&1 || true
       CURRENT_PHASE=$(ruby -rjson -e 'f="/opt/bucardo/state/status.json"; if File.exist?(f); puts(JSON.parse(File.read(f))["phase"] || ""); end' 2>/dev/null || true)
       if [ "$CURRENT_PHASE" != "copying" ] && [ "$CURRENT_PHASE" != "replicating" ]; then
@@ -275,6 +340,58 @@ EOF
     fi
   fi
 fi
+
+# Restarted during or after the index rebuild: make sure the sync exists and is
+# paused. The status server relaunches the rebuild from the registry.
+if [ "$PERSISTED_PHASE" = "rebuilding_indexes" ] || [ "$PERSISTED_PHASE" = "index_rebuild_failed" ]; then
+  if ! bucardo status planetscale_import >/dev/null 2>&1; then
+    echo "Reconstructing Bucardo sync for '$PERSISTED_PHASE' phase (paused)..."
+    sh /opt/bucardo/scripts/mk-bucardo-repl.sh --primary "$HEROKU_URL" --replica "$PLANETSCALE_URL" --skip-schema --no-initial-copy 2>&1 | tee /opt/bucardo/state/setup.log
+    if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+      bucardo pause planetscale_import >/dev/null 2>&1 || true
+    else
+      ERROR_MSG=$(tail -5 /opt/bucardo/state/setup.log | tr '\n' ' ' | sed 's/"/\\"/g')
+      cat > /opt/bucardo/state/status.json <<EOF
+{"phase":"error","state":"resume_failed","message":"Failed to rebuild Bucardo sync after restart.","error":"${ERROR_MSG}","started_at":"${PERSISTED_STARTED}"}
+EOF
+      echo "ERROR: Failed to rebuild sync for '$PERSISTED_PHASE'."
+    fi
+  else
+    bucardo pause planetscale_import >/dev/null 2>&1 || true
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# VAC (delta-purge) watchdog
+# ---------------------------------------------------------------------------
+# Bucardo only starts its delta-purge VAC daemon at MCP startup, and only if a
+# sync already exists. We start the MCP at boot, before the sync is created, so
+# on a fresh migration VAC never runs and applied deltas are never purged
+# (`bucardo delta` climbs forever). Once replication is steady, restart Bucardo
+# if VAC is missing: the MCP then comes up with the sync present. onetimecopy
+# has reset by then, so this resumes without re-copying. Gated to never fire
+# during the initial copy or the index rebuild.
+vac_watchdog() {
+  set +e
+  attempts=0
+  while true; do
+    sleep 10
+    ps_line=$(ruby -rjson -e 'd=(JSON.parse(File.read("/opt/bucardo/state/status.json")) rescue {}); puts "#{d["phase"]}|#{d["state"]}"' 2>/dev/null)
+    phase=${ps_line%%|*}; state=${ps_line#*|}
+    case "$phase" in replicating|switched) ;; *) continue ;; esac  # steady state / post-cutover only
+    [ "$state" = "paused" ] && continue            # don't disturb a user pause
+    if ps -eo args 2>/dev/null | grep -q "[B]ucardo VAC"; then
+      attempts=0; continue                         # VAC running -- all good
+    fi
+    otc=$(bucardo status planetscale_import 2>/dev/null | awk -F " : " '/^Onetimecopy/ {print $2}' | tr -d '[:space:]')
+    echo "$otc" | grep -qi "^Yes" && continue      # initial copy not finished -- never restart
+    [ "$attempts" -ge 3 ] && continue              # cap restarts to avoid a storm
+    attempts=$((attempts + 1))
+    echo "VAC watchdog: delta-purge VAC not running in steady replication; restarting Bucardo (attempt $attempts) to start it..."
+    bucardo restart >/dev/null 2>&1 || true
+  done
+}
+vac_watchdog &
 
 # ---------------------------------------------------------------------------
 # Keep the container running

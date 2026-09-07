@@ -1,4 +1,12 @@
+#!/bin/sh
 set -e
+# =============================================================================
+# mk-bucardo-repl.sh -- configure replication from primary to replica.
+#
+# Copies the schema, drops the target's secondary indexes for a faster initial
+# copy, registers both databases and all relations with Bucardo, then starts
+# the sync. Re-runnable: --skip-schema resumes without re-copying the schema.
+# =============================================================================
 
 usage() {
   printf "Usage: sh %s --primary \e[4mconninfo\e[0m --replica \e[4mconninfo\e[0m [--skip-schema] [--no-initial-copy]\n" "$(basename "$0")" >&2
@@ -37,11 +45,9 @@ fi
 if [ "$SKIP_SCHEMA" -eq 0 ]; then
   echo "Copying schema from primary to replica..."
 
-  # This image's pg_dump is PostgreSQL 17, whose schema-only dumps always
-  # start with "SET transaction_timeout = 0;". That GUC only exists on
-  # PostgreSQL 17+, so psql aborts with "unrecognized configuration
-  # parameter" if the replica is running an older major version. Strip the
-  # line in that case; PG17+ replicas are unaffected.
+  # pg_dump 17 always emits "SET transaction_timeout = 0;", a GUC that only
+  # exists on PG17+. Strip it for older replicas, which would otherwise abort
+  # with "unrecognized configuration parameter".
   EXCLUDE_PATTERN="^COMMENT ON EXTENSION "
   REPLICA_VERSION_NUM=$(psql "$REPLICA" -Atc "SHOW server_version_num;")
   if [ "$REPLICA_VERSION_NUM" -lt 170000 ]; then
@@ -55,16 +61,20 @@ else
   echo "Skipping schema copy (--skip-schema flag set)"
 fi
 
-# Add the primary (Heroku) database to Bucardo. Parse the subset of connection
-# information Bucardo needs from Heroku's URL-formatted connection information.
+# Drop secondary/unique indexes so the initial COPY skips per-row index
+# maintenance; rebuild recipes are recorded and replayed once it finishes.
+# Only meaningful on a fresh schema copy.
+if [ "$SKIP_SCHEMA" -eq 0 ]; then
+  sh "$(dirname "$0")/drop-secondary-indexes.sh" --replica "$REPLICA"
+fi
+
+# Register both databases, parsing the fields Bucardo needs out of each URL.
 bucardo add database "heroku" \
   host="$(echo "$PRIMARY" | cut -d "@" -f 2 | cut -d ":" -f 1)" \
   user="$(echo "$PRIMARY" | cut -d "/" -f 3 | cut -d ":" -f 1)" \
   password="$(echo "$PRIMARY" | cut -d ":" -f 3 | cut -d "@" -f 1)" \
   dbname="$(echo "$PRIMARY" | cut -d "/" -f 4 | cut -d "?" -f 1)"
 
-# Add the (soon to be) replica (PlanetScale) database to Bucardo. Parse the
-# connection information Bucardo needs from the URL-formatted connection string.
 bucardo add database "planetscale" \
   host="$(echo "$REPLICA" | cut -d "@" -f 2 | cut -d ":" -f 1)" \
   port="$(echo "$REPLICA" | cut -d "@" -f 2 | cut -d ":" -f 2 | cut -d "/" -f 1)" \
@@ -76,13 +86,9 @@ bucardo add database "planetscale" \
 bucardo add all sequences --relgroup "planetscale_import"
 bucardo add all tables --relgroup "planetscale_import"
 
-# Bucardo 5.6 does not filter out PostgreSQL generated columns when issuing
-# COPY against the target, which fails with "column ... is a generated column /
-# Generated columns cannot be used in COPY". For every table that has at least
-# one generated column, register a customcols entry against the planetscale db
-# that selects only the non-generated columns. The target already has the
-# generation expression (it came across via pg_dump --schema-only), so Postgres
-# recomputes the value on insert.
+# Bucardo 5.6 cannot COPY into generated columns, so for each table that has
+# one, register an override selecting only the non-generated columns. The
+# target keeps the generation expression and recomputes the value on insert.
 GENERATED_TABLES=$(psql "$PRIMARY" -A -t -F"|" -c "
   SELECT DISTINCT n.nspname, c.relname
   FROM pg_attribute a
@@ -123,6 +129,11 @@ else
   echo "Configuring sync without initial copy (--no-initial-copy flag set)..."
   bucardo add sync "planetscale_import" dbs="heroku,planetscale" onetimecopy=0 relgroup="planetscale_import"
 fi
+
+# `bucardo add sync` created the source-side track tables; `bucardo reload`
+# below starts the sync. Index them here, while they are still empty: instant,
+# and it locks nothing.
+sh "$(dirname "$0")/add-track-indexes.sh" --primary "$PRIMARY"
 
 # Give Bucardo enough time to validate all tables across both databases.
 # The default 30s timeout is too short for databases with many tables, since
