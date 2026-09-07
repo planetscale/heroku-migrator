@@ -1247,8 +1247,8 @@
           + '<code>PARALLEL_MAINTENANCE_WORKERS</code> settings do not apply.'
           + '</div>';
       }
-      const workers = cfg.workers || 8;
-      const def = cfg.workers_default || 8;
+      const workers = cfg.workers || 4;
+      const def = cfg.workers_default || 4;
       const maxw = cfg.max_workers || 100;
       const mwm = cfg.maintenance_work_mem || '1GB';
       const isCustom = !!cfg.overridden;

@@ -16,7 +16,7 @@
       "required": true
     },
     "INDEX_REBUILD_WORKERS": {
-      "description": "Number of indexes to rebuild in parallel after the initial copy (default 8). Peak target parallelism is roughly this times PARALLEL_MAINTENANCE_WORKERS.",
+      "description": "Number of indexes to rebuild in parallel after the initial copy (default 4). Peak target parallelism is roughly this times PARALLEL_MAINTENANCE_WORKERS.",
       "required": false
     },
     "MAINTENANCE_WORK_MEM": {
@@ -24,7 +24,7 @@
       "required": false
     },
     "PARALLEL_MAINTENANCE_WORKERS": {
-      "description": "max_parallel_maintenance_workers per index build (default 4).",
+      "description": "max_parallel_maintenance_workers per index build (default 2).",
       "required": false
     },
     "DISABLE_INDEX_DEFERRAL": {

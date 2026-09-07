@@ -140,7 +140,7 @@ docker run -d \
   --user 1000:1000 \
   heroku-migrator
 # Optional index-rebuild tuning:
-#   -e INDEX_REBUILD_WORKERS=8 -e MAINTENANCE_WORK_MEM=1GB -e PARALLEL_MAINTENANCE_WORKERS=4
+#   -e INDEX_REBUILD_WORKERS=4 -e MAINTENANCE_WORK_MEM=1GB -e PARALLEL_MAINTENANCE_WORKERS=2
 ```
 
 For databases under ~1 TB, Heroku is typically fine. For anything larger, use a host without forced restarts to avoid re-copying data.
@@ -208,9 +208,9 @@ Click the button at the top of this page, or deploy manually:
    count can also be changed live from the dashboard before the copy:
    ```bash
    heroku config:set \
-     INDEX_REBUILD_WORKERS=8 \
+     INDEX_REBUILD_WORKERS=4 \
      MAINTENANCE_WORK_MEM=1GB \
-     PARALLEL_MAINTENANCE_WORKERS=4
+     PARALLEL_MAINTENANCE_WORKERS=2
    ```
 4. Deploy:
    ```bash
@@ -390,9 +390,9 @@ Plan migration windows around the **initial copy** and your post-copy validation
 | `PLANETSCALE_URL` | Yes | PlanetScale Postgres connection URL |
 | `PASSWORD` | Yes | Password to access the migration dashboard |
 | `DISABLE_NOTIFICATIONS` | No | Set to `true` to disable migration progress notifications to PlanetScale (enabled by default) |
-| `INDEX_REBUILD_WORKERS` | No | How many indexes to rebuild in parallel after the initial copy (default `8`). See [Faster initial copy](#faster-initial-copy-deferred-index-rebuild). |
+| `INDEX_REBUILD_WORKERS` | No | How many indexes to rebuild in parallel after the initial copy (default `4`). See [Faster initial copy](#faster-initial-copy-deferred-index-rebuild). |
 | `MAINTENANCE_WORK_MEM` | No | `maintenance_work_mem` applied to each index build, e.g. `1GB` (default `1GB`). Allocated per concurrent build. |
-| `PARALLEL_MAINTENANCE_WORKERS` | No | `max_parallel_maintenance_workers` per index build (default `4`). |
+| `PARALLEL_MAINTENANCE_WORKERS` | No | `max_parallel_maintenance_workers` per index build (default `2`). |
 | `DISABLE_INDEX_DEFERRAL` | No | Set to `true` to keep all indexes in place during the initial copy (disables the speedup below; default `false`). When `true`, `INDEX_REBUILD_WORKERS`, `MAINTENANCE_WORK_MEM`, and `PARALLEL_MAINTENANCE_WORKERS` have no effect. See [Faster initial copy](#faster-initial-copy-deferred-index-rebuild). |
 
 ## Faster initial copy (deferred index rebuild)
@@ -491,9 +491,9 @@ Notes:
   self-owns its data dir, so no volume/chown setup is needed for an ephemeral run.
 - **Index-rebuild tuning** (optional; identical on Heroku via `heroku config:set`):
   ```bash
-  -e INDEX_REBUILD_WORKERS=8 \
+  -e INDEX_REBUILD_WORKERS=4 \
   -e MAINTENANCE_WORK_MEM=1GB \
-  -e PARALLEL_MAINTENANCE_WORKERS=4
+  -e PARALLEL_MAINTENANCE_WORKERS=2
   ```
   `INDEX_REBUILD_WORKERS` (parallel index builds) can also be changed live from
   the dashboard before starting the copy. Peak memory on the target ≈

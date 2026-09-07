@@ -113,9 +113,9 @@ Flow: `copying` → (copy finishes) → delta apply is paused → `rebuilding_in
 
 **Env vars (all optional):**
 - `DISABLE_INDEX_DEFERRAL` -- default `false`. Set to `true` to keep all indexes in place during the copy (no drop/rebuild). When `true`, the three vars below have **no effect**, `rebuilding_indexes` is skipped, and the dashboard hides the index-rebuild tuning control.
-- `INDEX_REBUILD_WORKERS` -- parallel index builds (default `8`). Tunable live from the dashboard before the copy.
+- `INDEX_REBUILD_WORKERS` -- parallel index builds (default `4`). Tunable live from the dashboard before the copy.
 - `MAINTENANCE_WORK_MEM` -- `maintenance_work_mem` per build (default `1GB`). Peak target memory ≈ workers × this value.
-- `PARALLEL_MAINTENANCE_WORKERS` -- `max_parallel_maintenance_workers` per build (default `4`).
+- `PARALLEL_MAINTENANCE_WORKERS` -- `max_parallel_maintenance_workers` per build (default `2`).
 
 **Diagnosing "target is missing indexes":** if the target has fewer indexes than the source and the run is stuck in `copying`, the rebuild was never triggered. The trigger is gated on the status server detecting the copy is finished *and* healthy (see "Stuck in `copying`..." below). Check `GET /status` → `rebuild_config` and `index_rebuild`.
 

@@ -41,9 +41,9 @@ PORT = (ENV["PORT"] || 8080).to_i
 # Deferred index rebuild: drop secondary/unique indexes before the copy
 # (drop-secondary-indexes.sh), rebuild in parallel after, with delta apply paused.
 # ---------------------------------------------------------------------------
-INDEX_REBUILD_WORKERS = ((ENV["INDEX_REBUILD_WORKERS"] || "8").to_i).clamp(1, 100)
+INDEX_REBUILD_WORKERS = ((ENV["INDEX_REBUILD_WORKERS"] || "4").to_i).clamp(1, 100)
 MAINTENANCE_WORK_MEM = ENV["MAINTENANCE_WORK_MEM"] || "1GB"
-PARALLEL_MAINTENANCE_WORKERS = ((ENV["PARALLEL_MAINTENANCE_WORKERS"] || "4").to_i).clamp(0, 32)
+PARALLEL_MAINTENANCE_WORKERS = ((ENV["PARALLEL_MAINTENANCE_WORKERS"] || "2").to_i).clamp(0, 32)
 INDEX_DEFERRAL_DISABLED = ENV["DISABLE_INDEX_DEFERRAL"]&.downcase == "true"
 REBUILD_LOG_FILE = File.join(STATE_DIR, "index-rebuild.log")
 # Dashboard-settable override for the number of parallel index builds. Persisted
