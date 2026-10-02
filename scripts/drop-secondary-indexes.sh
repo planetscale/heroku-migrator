@@ -13,7 +13,10 @@ set -e
 # so the database can never hold an object we are unable to rebuild.
 #
 # Primary keys are deliberately kept: almost every FK needs them and they are
-# usually narrow, so dropping them is high churn for little gain.
+# usually narrow, so dropping them is high churn for little gain. Indexes that
+# serve as a table's row identity in place of a primary key are kept too: the
+# REPLICA IDENTITY USING INDEX index, and the unique indexes of a table with no
+# primary key (Bucardo uses one of them as the key to apply changes by).
 # =============================================================================
 
 usage() {
@@ -129,6 +132,11 @@ BEGIN
       AND i.indislive
       AND NOT i.indisprimary      -- keep primary keys
       AND NOT i.indisexclusion    -- keep exclusion constraints
+      AND NOT i.indisreplident    -- keep the REPLICA IDENTITY USING INDEX index
+      -- keep uniques on tables without a primary key: they are the row identity
+      AND NOT (i.indisunique AND NOT EXISTS (
+            SELECT 1 FROM pg_index pk
+            WHERE pk.indrelid = i.indrelid AND pk.indisprimary))
     ORDER BY n.nspname, c.relname, ic.relname
   LOOP
     unsafe     := false;
@@ -138,7 +146,7 @@ BEGIN
     fk_tables  := ARRAY[]::text[];
 
     -- Enumerate every object that depends on this index. A foreign key is the
-    -- only dependent we can fully reconstruct; 
+    -- only dependent we can fully reconstruct;
     FOR dep IN
       SELECT dcon.oid AS dconoid, dcon.contype AS dcontype, dcon.conname AS dconname,
              dn.nspname AS dnsp, dcl.relname AS dtable,
