@@ -77,8 +77,18 @@ if [ "$SKIP_SCHEMA" -eq 0 ]; then
   if [ -n "$PG_PARTMAN_SCHEMA" ]; then
     echo "Detected pg_partman metadata; recreating partition maintenance configuration on replica..."
     pg_partman_ident=$(sql_identifier "$PG_PARTMAN_SCHEMA")
+    # dump_partitioned_table_definition() omits p_start_partition, so
+    # create_partition() would align boundaries to now() and can overlap the
+    # child tables pg_dump already created. Pin it to the oldest existing child
+    # (child_start_time for time-based sets, child_start_id for id-based).
     PG_PARTMAN_RECREATE_SQL=$(psql "$PRIMARY" -A -t -c "
-      SELECT ${pg_partman_ident}.dump_partitioned_table_definition(parent_table)
+      SELECT replace(
+               ${pg_partman_ident}.dump_partitioned_table_definition(parent_table),
+               format('p_parent_table := %L,', parent_table),
+               format('p_parent_table := %L,' || E'\n\tp_start_partition := %L,', parent_table,
+                 (SELECT coalesce(i.child_start_time::text, i.child_start_id::text)
+                  FROM (SELECT * FROM ${pg_partman_ident}.show_partitions(parent_table) LIMIT 1) s,
+                       ${pg_partman_ident}.show_partition_info(format('%I.%I', s.partition_schemaname, s.partition_tablename)) i)))
       FROM ${pg_partman_ident}.part_config
       ORDER BY parent_table;")
     if [ -n "$PG_PARTMAN_RECREATE_SQL" ]; then
