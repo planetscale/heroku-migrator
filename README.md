@@ -29,7 +29,6 @@ This tool helps you migrate your Heroku Postgres database to [PlanetScale](https
 - [Typical timing by phase](#typical-timing-by-phase)
 - [Environment variables](#environment-variables)
 - [Faster initial copy (deferred index rebuild)](#faster-initial-copy-deferred-index-rebuild)
-
 - [pg_partman support](#pg_partman-support)
 - [What is Bucardo?](#what-is-bucardo)
 - [Can I connect this to a Heroku follower/replica?](#can-i-connect-this-to-a-heroku-followerreplica)
