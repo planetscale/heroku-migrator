@@ -12,11 +12,7 @@ set -e
 # dependent we cannot fully reconstruct is left in place and marked 'skipped',
 # so the database can never hold an object we are unable to rebuild.
 #
-# Primary keys are deliberately kept: almost every FK needs them and they are
-# usually narrow, so dropping them is high churn for little gain. Indexes that
-# serve as a table's row identity in place of a primary key are kept too: the
-# REPLICA IDENTITY USING INDEX index, and the unique indexes of a table with no
-# primary key (Bucardo uses one of them as the key to apply changes by).
+# Primary keys and the REPLICA IDENTITY USING INDEX are deliberately kept
 # =============================================================================
 
 usage() {
@@ -133,10 +129,6 @@ BEGIN
       AND NOT i.indisprimary      -- keep primary keys
       AND NOT i.indisexclusion    -- keep exclusion constraints
       AND NOT i.indisreplident    -- keep the REPLICA IDENTITY USING INDEX index
-      -- keep uniques on tables without a primary key: they are the row identity
-      AND NOT (i.indisunique AND NOT EXISTS (
-            SELECT 1 FROM pg_index pk
-            WHERE pk.indrelid = i.indrelid AND pk.indisprimary))
     ORDER BY n.nspname, c.relname, ic.relname
   LOOP
     unsafe     := false;

@@ -6,8 +6,7 @@ set -uo pipefail
 # Exercises scripts/drop-secondary-indexes.sh and the rebuild contract against
 # any plain PostgreSQL database. Asserts that:
 #   - only secondary and unique indexes are dropped; primary keys are kept
-#   - row-identity indexes are kept: REPLICA IDENTITY USING INDEX, and the
-#     uniques of a table with no primary key
+#   - the REPLICA IDENTITY USING INDEX index is kept
 #   - foreign keys depending on a dropped unique are recorded and dropped first
 #   - drops never CASCADE, and every drop has a recorded rebuild recipe
 #   - replaying the registry restores an identical set of indexes and constraints
@@ -105,7 +104,7 @@ seed_schema() {
       uuid text NOT NULL,
       note text
     );
-    CREATE UNIQUE INDEX nopk_uuid_uidx ON nopk (uuid);                   -- row identity (no PK): kept
+    CREATE UNIQUE INDEX nopk_uuid_uidx ON nopk (uuid);                   -- unique, no PK: dropped + rebuilt
 
     CREATE TABLE replident (
       id   int PRIMARY KEY,
@@ -161,16 +160,16 @@ assert_no_index "child_note_idx"             # secondary dropped
 assert_no_index "parent_code_uidx"           # standalone unique dropped
 assert_no_constraint "parent_email_key"      # unique constraint dropped
 assert_no_constraint "child_parent_fk"       # dependent FK dropped first
-assert_contains_index "nopk_uuid_uidx"       # unique on a table with no PK kept
+assert_no_index "nopk_uuid_uidx"             # unique on a table with no PK dropped
 assert_contains_index "replident_uuid_uidx"  # REPLICA IDENTITY index kept
 
 reg_total=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes")
 reg_fk=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE kind='fkey' AND pass=2")
 reg_unique=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE kind='unique'")
 reg_index=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE kind='index'")
-assert_eq "registry total rows" "6" "$reg_total"          # 3 secondary + 2 unique + 1 fk
+assert_eq "registry total rows" "7" "$reg_total"          # 3 secondary + 3 unique + 1 fk
 assert_eq "registry FK rows (pass 2)" "1" "$reg_fk"
-assert_eq "registry unique rows" "2" "$reg_unique"
+assert_eq "registry unique rows" "3" "$reg_unique"
 assert_eq "registry secondary index rows" "3" "$reg_index"
 
 # verify no CASCADE in the script
@@ -196,7 +195,7 @@ else
 fi
 
 done_rows=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE status='done'")
-assert_eq "all registry rows rebuilt (done)" "6" "$done_rows"
+assert_eq "all registry rows rebuilt (done)" "7" "$done_rows"
 
 # constraints actually enforced again
 assert_has_constraint "parent_email_key"
@@ -225,7 +224,7 @@ run_rebuild
 failed_rows=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE status='failed'")
 done_rows=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE status='done'")
 assert_eq "exactly one index failed" "1" "$failed_rows"
-assert_eq "the other five rebuilt successfully" "5" "$done_rows"
+assert_eq "the other six rebuilt successfully" "6" "$done_rows"
 assert_contains_index "child_note_idx"   # an unrelated index still built
 assert_has_constraint "child_parent_fk"  # FK still rebuilt despite the failure
 assert_no_index "parent_name_idx"        # the failed one is absent (as expected)
