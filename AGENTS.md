@@ -32,18 +32,25 @@ Every extension listed must be enabled on the PlanetScale database before starti
 
 ### 2. Primary keys and unique indexes
 
-Every table must have a primary key or unique index. Bucardo cannot track rows without one.
+Every table must have a primary key or unique index, **in every schema being migrated** -- not just `public`. Bucardo cannot track rows without one, and refuses to add the sync.
 
 ```sql
-SELECT c.relname
+SELECT n.nspname || '.' || c.relname
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = 'public' AND c.relkind = 'r'
+WHERE c.relkind = 'r'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'bucardo', '_ps_migrator', 'pscale_extensions')
+  AND left(n.nspname, 3) <> 'pg_'
+  AND n.nspname NOT IN (
+    SELECT en.nspname FROM pg_extension e
+    JOIN pg_namespace en ON en.oid = e.extnamespace
+    WHERE en.nspname NOT IN ('public', 'pg_catalog')
+  )
   AND NOT EXISTS (
     SELECT 1 FROM pg_index i
     WHERE i.indrelid = c.oid AND (i.indisprimary OR i.indisunique)
   )
-ORDER BY c.relname;
+ORDER BY 1;
 ```
 
 If any tables are returned, the user must add a primary key or unique index to each one on their Heroku database before starting. Example fix: `ALTER TABLE table_name ADD PRIMARY KEY (id);`
@@ -105,11 +112,71 @@ PostgreSQL `GENERATED ALWAYS AS ... STORED` columns are handled automatically by
 
 Always use a clean PlanetScale database or branch for each migration attempt. Retrying against a target that has leftover tables/data from a failed run will cause errors.
 
+## What gets replicated (schema scope)
+
+All application schemas are migrated, not just `public`. Scope differs between the two stages.
+
+**Schema copy.** `pg_dump` with `--exclude-schema` for `bucardo`, `_ps_migrator` and `pscale_extensions`: the migrator's own bookkeeping must never land on the customer's target. Bucardo's triggers sit on *application* tables, so `--exclude-schema` alone leaves them behind referencing a schema that is no longer dumped -- the copy then fails with `schema "bucardo" does not exist`, and if it succeeded the target would inherit delta tracking. They are filtered by `EXCLUDE_PATTERN` as well. This matters on a re-copy after a failed run, where the source may still carry Bucardo artifacts. `pg_catalog`/`information_schema`/`pg_*` need no handling; pg_dump never emits them. Extension schemas (`heroku_ext`, `partman`) **are** copied and must be: column types depend on them, and pg_partman's template tables are referenced from its config.
+
+**Replication.** Bucardo's `add all tables` enrols every user table. Three kinds of relation are then **subtracted** in [scripts/mk-bucardo-repl.sh](scripts/mk-bucardo-repl.sh), because Bucardo cannot replicate them and `bucardo add sync` fails outright if they are left in:
+
+- **Anything in a schema an extension was installed into** (e.g. `partman`). Holds extension config tables and internal tables with no primary key.
+- **Any table owned by an extension** (`pg_depend.deptype = 'e'`). This is what catches an extension installed into `public` -- PostGIS's `spatial_ref_sys`, or pg_partman installed without its own schema.
+- **Any table the migrator has no `TRIGGER` privilege on.** Bucardo replicates via triggers, so without it the table cannot be carried. The setup log lists every exclusion and why.
+
+The same scope governs the primary-key preflight and the Switch Traffic `REVOKE`/`GRANT`, which run over **every migrated schema**. `MIGRATED_SCHEMA_SCOPE_SQL` in [status-server/server.rb](status-server/server.rb) and the `NOT_REPLICATABLE` query in [scripts/mk-bucardo-repl.sh](scripts/mk-bucardo-repl.sh) are complements of each other and must be kept in sync; `tests/test_schema_scope.sh` asserts they agree.
+
+Tables left out of the scope are not replicated, so a missing primary key on one of them is not an error and is not reported.
+
+## pg_partman
+
+pg_partman works, with one manual step: pause pg_partman maintenance before starting, and resume it on PlanetScale after cutover. Everything else is automated. The migrator replicates the **leaf partitions** (ordinary tables in an app schema); the partitioned parent is `relkind = 'p'` and carries no rows of its own, so Bucardo skips it and the schema copy recreates it. pg_partman's own `partman` schema is excluded from replication per the scope rules above.
+
+**Before starting (required):**
+
+1. **Pause pg_partman maintenance** -- the pg_cron job, or whatever calls `partman.run_maintenance_proc()`. Leave it paused until after cutover, then resume it on PlanetScale.
+2. Installing pg_partman on the PlanetScale target ahead of time is fine; the schema copy is idempotent about schemas that already exist. Letting the schema copy create it works too.
+
+Client tools in the image are PostgreSQL 18, because `pg_dump` refuses to dump a server newer than itself. PG17 and PG18 are supported in either position (source or target); all four combinations are covered by `tests/test_schema_scope.sh` fixtures and were verified end to end.
+
+**Why pausing matters:** Bucardo's relation list is fixed when the sync is created. A partition that maintenance creates *after* that point is not in the sync, so rows written to it are **never replicated and nothing reports an error** -- `bucardo status` stays `Good` and the dashboard stays healthy. With `automatic_maintenance = 'on'` (the pg_partman default) this happens unattended.
+
+**Partition config is recreated automatically, after the data copy.** The schema copy carries the extension, not `part_config`'s rows, so the target would otherwise have pg_partman installed with no sets registered and would never create another partition. [scripts/recreate-partman-config.sh](scripts/recreate-partman-config.sh) replays the source's config onto the replica; the status server runs it once the initial copy is complete -- after a clean deferred index rebuild, or directly after the copy when deferral is disabled -- and before delta apply resumes. Its output goes to the index-rebuild log (`GET /logs` → `rebuild`), not the setup log. pg_partman's schema is resolved from `pg_extension`, so a non-default install schema works.
+
+Three details matter:
+
+- **It must not run before the copy.** `create_partition()` premakes partitions on the target. Bucardo enrols leaf partitions and copies **leaf to leaf**, bypassing tuple routing, so source rows sitting in a DEFAULT partition whose range a premade target partition now covers are pushed into a target DEFAULT that rejects them (`new row ... violates partition constraint`). The KID dies, restarts, re-copies from the first table and dies again -- indefinitely, while `/status` still reports `copying` with `error: null`. Running the replay after the copy removes the hazard: nothing is premade until every row has landed.
+- **`p_start_partition` is pinned** to the oldest existing child. `dump_partitioned_table_definition()` omits it, so the replayed `create_partition()` aligns to `now()`; when the source's premade partitions no longer span `now() + premake` it creates partitions the source lacks and then collides with the default partition pg_dump already made, failing that set. Because it depends on `now()`, the same source can replay cleanly one day and fail the next.
+- **It is deliberately fail-soft** (no `ON_ERROR_STOP`). A set that will not replay -- a sub-partitioned one, for instance -- is reported and the migration continues; the data copy is unaffected. Running after the copy also means Postgres itself refuses a premake that would strand rows already in a DEFAULT partition (`updated partition constraint for default partition ... would be violated by some row`); that set is reported and skipped rather than breaking anything. Until it is re-registered, pg_partman creates no new partitions for that table on PlanetScale; re-register it there after cutover with `partman.create_parent()`, using the same settings as on the source. Sub-partitioned sets (`part_config_sub`) are counted and called out, since the dump function covers single-level sets only.
+
+Re-running the replay is idempotent, so a retry is safe.
+
+**Checking a source for pg_partman:**
+
+```sql
+SELECT e.extname, n.nspname AS schema, e.extversion
+FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+WHERE e.extname = 'pg_partman';
+
+SELECT parent_table, control, partition_interval, automatic_maintenance
+FROM partman.part_config ORDER BY parent_table;
+```
+
 ## Deferred index rebuild
 
 To speed up the initial copy, the migrator **drops the target's secondary and unique indexes before copying** (primary keys are kept) and rebuilds them after the copy finishes. Definitions are recorded in `_ps_migrator.dropped_indexes` on the target. This is the default behavior.
 
+Scope is every migrated schema (same rule as replication) and `relkind IN ('r','p')`, so **partitioned tables are covered**: the index is dropped and rebuilt on the parent, which cascades to every partition. Three details make that work:
+
+- **Child indexes are not registered separately.** An index that is a partition of a partitioned index (`pg_inherits` on `indexrelid`) cannot be dropped on its own, so only the parent is recorded. An index created directly on one partition is not part of a partitioned index and is handled individually.
+- **`ON ONLY` is stripped from the rebuild recipe.** `pg_get_indexdef` emits `CREATE INDEX ... ON ONLY parent` for a partitioned index; replayed verbatim that builds a childless index left `indisvalid = false` — it still appears in `pg_indexes`, so every schema check passes while queries silently seq-scan. Without `ONLY` the single statement builds every partition.
+- **Sizing uses `pg_partition_tree`.** A partitioned parent stores nothing itself, so `pg_total_relation_size` returns 0 and the largest rebuild would be claimed last. `GREATEST(pg_total_relation_size(...), sum over pg_partition_tree(...))` covers both shapes; `pg_partition_tree` returns no rows for a plain table.
+
 Flow: `copying` → (copy finishes) → delta apply is paused → `rebuilding_indexes` (indexes rebuilt `INDEX_REBUILD_WORKERS` at a time) → if all succeed, replication resumes → `replicating`. If any index fails, the run holds in `index_rebuild_failed` so the user can **Retry Failed Indexes** or **Proceed Anyway**.
+
+**What drives the transition.** `apply_auto_transitions` in [status-server/server.rb](status-server/server.rb) is run both by `GET /status` and by a background phase watcher that ticks every 30s, so the migration progresses with no dashboard open. It used to run only in the `/status` handler: with nobody polling, a finished copy sat in `copying` indefinitely -- in one run for 11.7 hours, while deltas were applied to a target still missing its secondary indexes. The watcher only does work in `ready_to_copy`, `copying` and `rebuilding_indexes`, skips its tick if `/status` evaluated within the last 20s (so an open dashboard and the watcher do not both shell out to `bucardo status`), and shares `$phase_transition_mutex` with `/status` so the two can never transition concurrently. It logs only when it actually causes a transition (`[phase-watcher] copying -> rebuilding_indexes`).
+
+Progress is written to `index-rebuild.log` in the state dir, exposed as the `rebuild` field of `GET /logs`: one line per object with its name, table, kind and size, a running `[n/total done, building, pending, failed]` counter, and on failure the reason plus the SQL to retry by hand.
 
 **Env vars (all optional):**
 - `DISABLE_INDEX_DEFERRAL` -- default `false`. Set to `true` to keep all indexes in place during the copy (no drop/rebuild). When `true`, the three vars below have **no effect**, `rebuilding_indexes` is skipped, and the dashboard hides the index-rebuild tuning control.
@@ -158,6 +225,37 @@ Bucardo 5.6 does not filter out PostgreSQL `GENERATED ALWAYS AS ... STORED` colu
    ```
 
 3. Abort the migration in the dashboard, recreate the PlanetScale target as a fresh database/branch, and start the migration again.
+
+### "permission denied for table part_config" (or any extension table)
+
+```
+Failed to add sync: DBD::Pg::st execute failed: ERROR:  DBD::Pg::db do failed:
+ERROR:  permission denied for table part_config at line 128. at line 30.
+CONTEXT:  PL/Perl function "validate_sync" at /usr/local/bin/bucardo line 4670.
+```
+
+Bucardo enrolled a table owned by an extension and tried to put a replication trigger on it. The Heroku connection role does not own extension tables, so `CREATE TRIGGER` is denied. Current migrator subtracts these before adding the sync (see "What gets replicated"); the setup log shows `Excluding tables Bucardo cannot replicate`. If a user hits this on an older build, upgrade -- there is no config workaround, and granting `TRIGGER` on the extension's tables is the wrong fix (it would replicate the extension's own config over the target's).
+
+### "Table X must specify a primary key!" during setup
+
+```
+Failed to add sync: DBD::Pg::st execute failed:
+ERROR:  Table "analytics.clickstream" must specify a primary key! at line 119.
+```
+
+Bucardo needs a primary key or unique index on every table in the sync. Two causes:
+
+- **An app table in a non-`public` schema.** Older builds only ran the preflight check against `public`, so the dashboard reported "all tables valid" and the migration then failed here. Add a primary key or unique index to the table and retry.
+- **An extension-internal table**, e.g. pg_partman's `partman.template_*`, which have no primary key by design. Current migrator excludes these automatically.
+
+### "schema ... already exists" during the schema copy
+
+```
+CREATE SCHEMA partman;
+ERROR:  schema "partman" already exists
+```
+
+The target already had that schema -- normally because an extension such as pg_partman was installed on PlanetScale ahead of the migration, which is a reasonable thing to have done. `psql` runs with `ON_ERROR_STOP=1`, so the whole schema copy aborts and the run lands in `error` / `setup_failed` with nothing created. Current migrator rewrites `CREATE SCHEMA x;` to `CREATE SCHEMA IF NOT EXISTS x;` in the dump stream. (`CREATE EXTENSION` never needed this: pg_dump already emits it with `IF NOT EXISTS`.)
 
 ### Deadlock during validate_sync
 
@@ -234,7 +332,7 @@ To report coverage without changing anything: `sh /opt/bucardo/scripts/add-track
 
 ### Switch Traffic didn't stop writes
 
-The switch runs `REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public FROM <role>`. **A `REVOKE` cannot constrain a Postgres SUPERUSER** -- superusers bypass all privilege checks -- and table **owners** retain implicit rights too. So if the connection role is a superuser (very common when testing locally as `postgres`), the REVOKE reports success but writes keep working. On Heroku this is a non-issue: `DATABASE_URL` connects as a non-superuser app role, so the REVOKE genuinely blocks writes. To block writes locally, connect the app/migrator as a non-superuser, non-owner role.
+The switch runs `REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA <s> FROM <role>` once per migrated schema (see "What gets replicated"), so a source with app tables outside `public` is fully frozen. **A `REVOKE` cannot constrain a Postgres SUPERUSER** -- superusers bypass all privilege checks -- and table **owners** retain implicit rights too. So if the connection role is a superuser (very common when testing locally as `postgres`), the REVOKE reports success but writes keep working. On Heroku this is a non-issue: `DATABASE_URL` connects as a non-superuser app role, so the REVOKE genuinely blocks writes. To block writes locally, connect the app/migrator as a non-superuser, non-owner role.
 
 ### "Cannot resume: target is missing schema(s)"
 

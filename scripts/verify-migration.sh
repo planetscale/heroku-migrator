@@ -19,6 +19,11 @@ fi
 
 # Schemas/tables that belong to the migration tooling, not the user's data.
 ART_SCHEMAS="'pg_catalog','information_schema','pg_toast','bucardo','_ps_migrator','pscale_extensions'"
+# Relations an extension owns, schema-qualified
+EXT_OWNED="SELECT en.nspname||'.'||ec.relname FROM pg_class ec
+           JOIN pg_namespace en ON en.oid = ec.relnamespace
+           JOIN pg_depend ed ON ed.classid = 'pg_class'::regclass
+                            AND ed.objid = ec.oid AND ed.deptype = 'e'"
 ART_TABLE="_ps_migration_state"
 
 PASS=0; FAIL=0; WARN=0
@@ -28,10 +33,7 @@ warn() { WARN=$((WARN+1)); echo "  [WARN] $*"; }
 info() { echo "  - $*"; }
 section() { echo ""; echo "==================================================================="; echo "  $1"; echo "==================================================================="; }
 
-# A failed query returns no rows, which every comparison below would read as
-# "nothing missing" -- a broken source reporting as a clean match. Record
-# failures and abort instead. q() runs inside $(...) and <(...), where exit
-# would only end the subshell, hence the file.
+
 QERR="$(mktemp)"
 trap 'rm -f "$QERR"' EXIT
 
@@ -47,7 +49,6 @@ q() {
   printf '%s\n' "$out" | grep -v '^$' || true
 }
 
-# Call after each section: if any query failed, the comparisons are meaningless.
 check_queries() {
   [ -s "$QERR" ] || return 0
   echo ""
@@ -69,11 +70,12 @@ info "Source: $(q "$SRC" "SHOW server_version" | head -1)   Target: $(q "$TGT" "
 # ---------------------------------------------------------------------------
 section "2  TABLES"
 TBL="SELECT n.nspname||'.'||c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-     WHERE c.relkind='r' AND n.nspname NOT IN ($ART_SCHEMAS) AND c.relname<>'$ART_TABLE' ORDER BY 1"
+     WHERE c.relkind IN ('r','p') AND n.nspname NOT IN ($ART_SCHEMAS) AND c.relname<>'$ART_TABLE'
+       AND n.nspname||'.'||c.relname NOT IN ($EXT_OWNED) ORDER BY 1"
 ST=$(q "$SRC" "$TBL"); TT=$(q "$TGT" "$TBL")
 check_queries
 info "Source tables: $(lc "$ST")   Target tables: $(lc "$TT")"
-# Nothing to compare against means every check below would pass vacuously.
+
 if [ "$(lc "$ST")" -eq 0 ]; then
   fail "Source has no user tables — wrong database, or the schema was never created."
   echo ""; echo "RESULT: FAILED — nothing to verify against."; exit 2
@@ -87,6 +89,7 @@ EXTRA=$(comm -13 <(echo "$ST"|sort) <(echo "$TT"|sort) 2>/dev/null || true)
 section "3  COLUMNS"
 COL="SELECT table_schema||'.'||table_name||' '||column_name||' '||data_type||' null='||is_nullable||' def='||COALESCE(column_default,'-')
      FROM information_schema.columns WHERE table_schema NOT IN ($ART_SCHEMAS) AND table_name<>'$ART_TABLE'
+       AND table_schema||'.'||table_name NOT IN ($EXT_OWNED)
      ORDER BY 1"
 MISS=$(comm -23 <(q "$SRC" "$COL"|sort) <(q "$TGT" "$COL"|sort) 2>/dev/null || true)
 [ -z "$MISS" ] && pass "All column definitions match" || { fail "Columns missing/changed in target ($(lc "$MISS")):"; echo "$MISS" | head -30 | sed 's/^/         /'; }
@@ -95,7 +98,8 @@ check_queries
 # ---------------------------------------------------------------------------
 section "4  INDEXES"
 IDX="SELECT schemaname||'.'||tablename||' '||indexname||' '||indexdef FROM pg_indexes
-     WHERE schemaname NOT IN ($ART_SCHEMAS) AND tablename<>'$ART_TABLE' ORDER BY 1"
+     WHERE schemaname NOT IN ($ART_SCHEMAS) AND tablename<>'$ART_TABLE'
+       AND schemaname||'.'||tablename NOT IN ($EXT_OWNED) ORDER BY 1"
 MISS=$(comm -23 <(q "$SRC" "$IDX"|sort) <(q "$TGT" "$IDX"|sort) 2>/dev/null || true)
 EXTRA=$(comm -13 <(q "$SRC" "$IDX"|sort) <(q "$TGT" "$IDX"|sort) 2>/dev/null || true)
 [ -z "$MISS" ] && pass "All indexes present in target" || { fail "Indexes missing in target ($(lc "$MISS")):"; echo "$MISS" | head -30 | sed 's/^/         /'; }
@@ -107,7 +111,8 @@ section "5  CONSTRAINTS (PK / FK / UNIQUE / CHECK; NOT NULL excluded)"
 # contype is "char"; without the cast the || is ambiguous and the whole query errors.
 CON="SELECT n.nspname||'.'||t.relname||' '||c.conname||' '||c.contype::text||' '||pg_get_constraintdef(c.oid,true)
      FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
-     WHERE n.nspname NOT IN ($ART_SCHEMAS) AND t.relname<>'$ART_TABLE' AND c.contype<>'n' ORDER BY 1"
+     WHERE n.nspname NOT IN ($ART_SCHEMAS) AND t.relname<>'$ART_TABLE' AND c.contype<>'n'
+       AND n.nspname||'.'||t.relname NOT IN ($EXT_OWNED) ORDER BY 1"
 MISS=$(comm -23 <(q "$SRC" "$CON"|sort) <(q "$TGT" "$CON"|sort) 2>/dev/null || true)
 [ -z "$MISS" ] && pass "All constraints present and matching in target" || { fail "Constraints missing/changed in target ($(lc "$MISS")):"; echo "$MISS" | head -30 | sed 's/^/         /'; }
 check_queries
@@ -115,19 +120,17 @@ check_queries
 # ---------------------------------------------------------------------------
 section "6  SEQUENCES"
 SEQ="SELECT n.nspname||'.'||c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-     WHERE c.relkind='S' AND n.nspname NOT IN ($ART_SCHEMAS) ORDER BY 1"
+     WHERE c.relkind='S' AND n.nspname NOT IN ($ART_SCHEMAS)
+        AND n.nspname||'.'||c.relname NOT IN ($EXT_OWNED) ORDER BY 1"
 MISS=$(comm -23 <(q "$SRC" "$SEQ"|sort) <(q "$TGT" "$SEQ"|sort) 2>/dev/null || true)
 [ -z "$MISS" ] && pass "All sequences present in target ($(lc "$(q "$SRC" "$SEQ")") sequences)" || { fail "Sequences missing in target:"; echo "$MISS" | sed 's/^/         /'; }
 
-# Values, not just names: a target sequence behind the source hands out primary
-# keys that already exist, so the app hits duplicate-key errors right after
-# cutover. Ahead is harmless (just a gap), so only "behind" fails.
-# last_value is NULL until a sequence is first used -- that is the "sequences
-# were never synced" case, so fall back to start_value rather than skipping it.
+# Values, not just names
 SEQV="SELECT n.nspname||'.'||c.relname, COALESCE(COALESCE(s.last_value, s.start_value)::text,'')
       FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
       LEFT JOIN pg_sequences s ON s.schemaname=n.nspname AND s.sequencename=c.relname
-      WHERE c.relkind='S' AND n.nspname NOT IN ($ART_SCHEMAS) ORDER BY 1"
+      WHERE c.relkind='S' AND n.nspname NOT IN ($ART_SCHEMAS)
+        AND n.nspname||'.'||c.relname NOT IN ($EXT_OWNED) ORDER BY 1"
 SRC_SEQV=$(q "$SRC" "$SEQV"); TGT_SEQV=$(q "$TGT" "$SEQV")
 check_queries
 BEHIND=""; UNREAD=""; SEQ_OK=0
@@ -153,17 +156,26 @@ fi
 
 # ---------------------------------------------------------------------------
 # Exact COUNT(*) on up to 10 random tables under 10 GB, 60s each. Larger
-# tables are skipped: counting them can hang or overload the source.
+# tables are skipped.
 section "7  EXACT ROW COUNTS (random sample of up to 10 tables under 10 GB; exact COUNT(*))"
 # format('%I.%I') so names needing quotes (mixed case, spaces) are usable as-is;
 # read -r so a name with spaces stays one table.
 SAMPLE="SELECT format('%I.%I', n.nspname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE c.relkind='r' AND n.nspname NOT IN ($ART_SCHEMAS) AND c.relname<>'$ART_TABLE'
-          AND pg_total_relation_size(c.oid) > 0
-          AND pg_total_relation_size(c.oid) < 10 * 1024^3   -- skip tables >= 10 GB
+        CROSS JOIN LATERAL (SELECT GREATEST(pg_total_relation_size(c.oid),
+            (SELECT coalesce(sum(pg_total_relation_size(t.relid)),0)
+             FROM pg_partition_tree(c.oid) t)) AS sz) z
+        WHERE c.relkind IN ('r','p') AND n.nspname NOT IN ($ART_SCHEMAS) AND c.relname<>'$ART_TABLE'
+          AND n.nspname NOT IN (
+            SELECT en.nspname FROM pg_extension e
+            JOIN pg_namespace en ON en.oid = e.extnamespace
+            WHERE en.nspname NOT IN ('public','pg_catalog'))
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_depend d
+            WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.deptype='e')
+          AND z.sz > 0
+          AND z.sz < 10 * 1024^3   -- skip relations >= 10 GB
         ORDER BY random() LIMIT 10"
 
-# Returns the count, or "" on error; the error text goes to $CNT_ERR.
 CNT_ERR=""
 count_rows() { # url, quoted_table
   local err out rc

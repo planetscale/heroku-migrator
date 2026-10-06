@@ -30,9 +30,7 @@ if [ -z "$PASSWORD" ]; then
   exit 1
 fi
 
-# Default both URLs to sslmode=require when it is omitted, so operators do not
-# have to tweak URL parameters and the two sides cannot end up on different
-# certificate modes.
+# Default both URLs to sslmode=require when it is omitted
 if [[ "$HEROKU_URL" != *"sslmode="* ]]; then
   if [[ "$HEROKU_URL" == *"?"* ]]; then
     HEROKU_URL="${HEROKU_URL}&sslmode=require"
@@ -80,8 +78,6 @@ if ! whoami &>/dev/null; then
 fi
 export HOME="/opt/bucardo"
 
-# Private temp dir for all children: Ruby's Dir.tmpdir rejects a
-# world-writable one without the sticky bit, so a 0777 /tmp would break it.
 export TMPDIR="$HOME/tmp"
 export TMP="$TMPDIR"
 mkdir -p "$TMPDIR" 2>/dev/null || true
@@ -92,8 +88,6 @@ if [ ! -w "$TMPDIR" ]; then
   export TMP=/tmp
 fi
 
-# Bucardo writes bucardo.restart.reason.txt to the working directory, and would
-# not start from a non-writable one.
 cd "$HOME" || true
 
 # ---------------------------------------------------------------------------
@@ -236,12 +230,10 @@ RCEOF
   bucardo set log_level=verbose
 
   # Purge applied deltas aggressively so deltas converge to 0 quickly after writes
-  # are frozen. vac_run is the actual purge interval (default 30s); vac_sleep is the
-  # VAC's internal check granularity.
+  # are frozen. 
   bucardo set vac_run=10 vac_sleep=5
 
-  # TCP keepalives so a silently-dropped long-haul connection can't stall
-  # replication: idle 60s, probe every 10s, drop after 6 failures.
+  # TCP keepalives so a silently-dropped long-haul connection can't stall replication
   bucardo set tcp_keepalives_idle=60 tcp_keepalives_interval=10 tcp_keepalives_count=6
 
   echo "Starting Bucardo daemon..."
@@ -374,12 +366,20 @@ fi
 vac_watchdog() {
   set +e
   attempts=0
+  mcp_settle=180
   while true; do
     sleep 10
     ps_line=$(ruby -rjson -e 'd=(JSON.parse(File.read("/opt/bucardo/state/status.json")) rescue {}); puts "#{d["phase"]}|#{d["state"]}"' 2>/dev/null)
     phase=${ps_line%%|*}; state=${ps_line#*|}
     case "$phase" in replicating|switched) ;; *) continue ;; esac  # steady state / post-cutover only
     [ "$state" = "paused" ] && continue            # don't disturb a user pause
+    # If Bucardo down entirely
+    if ! ps -eo args 2>/dev/null | grep -q "[B]ucardo Master Control Program"; then
+      echo "VAC watchdog: no Bucardo MCP running; starting Bucardo..."
+      bucardo start >/dev/null 2>&1 || true
+      sleep "$mcp_settle"
+      continue
+    fi
     if ps -eo args 2>/dev/null | grep -q "[B]ucardo VAC"; then
       attempts=0; continue                         # VAC running -- all good
     fi
@@ -389,6 +389,7 @@ vac_watchdog() {
     attempts=$((attempts + 1))
     echo "VAC watchdog: delta-purge VAC not running in steady replication; restarting Bucardo (attempt $attempts) to start it..."
     bucardo restart >/dev/null 2>&1 || true
+    sleep "$mcp_settle"
   done
 }
 vac_watchdog &

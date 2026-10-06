@@ -46,6 +46,10 @@ fi
 echo "Dropping secondary/unique indexes on the target for a faster initial copy..."
 
 psql "$REPLICA" -v ON_ERROR_STOP=1 <<'SQL'
+
+DO $$ BEGIN PERFORM set_config('transaction_timeout','0',false);
+EXCEPTION WHEN undefined_object THEN NULL; END $$;
+
 -- One transaction: the recorded rebuild recipes and the DROPs commit together
 -- or not at all, so an index can never be dropped without its recipe. Any
 -- failure -- an unforeseen dependency, a lost connection -- rolls back, and
@@ -96,7 +100,7 @@ BEGIN
            c.relname AS tablename,
            ic.relname AS objectname,
            i.indisunique,
-           pg_get_indexdef(i.indexrelid) AS indexdef,
+           regexp_replace(pg_get_indexdef(i.indexrelid), ' ON ONLY ', ' ON ') AS indexdef,
            con.oid     AS conoid,
            con.conname AS conname,
            CASE WHEN con.oid IS NOT NULL THEN pg_get_constraintdef(con.oid) END AS condef
@@ -106,9 +110,22 @@ BEGIN
     JOIN pg_namespace n   ON n.oid = c.relnamespace
     LEFT JOIN pg_constraint con
            ON con.conindid = i.indexrelid AND con.contype IN ('u', 'p')
-    WHERE n.nspname = 'public'
-      AND c.relkind = 'r'
-      AND NOT c.relispartition
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'bucardo', '_ps_migrator', 'pscale_extensions')
+      AND left(n.nspname, 3) <> 'pg_'
+      AND n.nspname NOT IN (
+        SELECT en.nspname FROM pg_extension e
+        JOIN pg_namespace en ON en.oid = e.extnamespace
+        WHERE en.nspname NOT IN ('public', 'pg_catalog')
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_depend dx
+        WHERE dx.classid = 'pg_class'::regclass
+          AND dx.objid = c.oid AND dx.deptype = 'e'
+      )
+      -- 'p' is the partitioned parent: dropping its index drops every child's,
+      -- and rebuilding it rebuilds them all. 
+      AND c.relkind IN ('r', 'p')
+      AND NOT EXISTS (SELECT 1 FROM pg_inherits ih WHERE ih.inhrelid = i.indexrelid)
       AND i.indislive
       AND NOT i.indisprimary      -- keep primary keys
       AND NOT i.indisexclusion    -- keep exclusion constraints
@@ -121,8 +138,7 @@ BEGIN
     fk_tables  := ARRAY[]::text[];
 
     -- Enumerate every object that depends on this index. A foreign key is the
-    -- only dependent we can fully reconstruct; anything else (e.g. REPLICA
-    -- IDENTITY USING INDEX) makes the drop unsafe, so we leave the index alone.
+    -- only dependent we can fully reconstruct; 
     FOR dep IN
       SELECT dcon.oid AS dconoid, dcon.contype AS dcontype, dcon.conname AS dconname,
              dn.nspname AS dnsp, dcl.relname AS dtable,
@@ -142,12 +158,7 @@ BEGIN
       END IF;
 
       IF dep.dcontype = 'f' THEN
-        -- Re-add the FK as NOT VALID, then VALIDATE it separately. The data was
-        -- copied from a source where this FK already held, so re-checking every
-        -- row is redundant: a plain ADD CONSTRAINT would scan the whole (now
-        -- fully-copied) child table under a heavy lock. NOT VALID makes the ADD
-        -- instant; the follow-up VALIDATE takes a lighter SHARE UPDATE EXCLUSIVE
-        -- lock and leaves the constraint fully valid -- identical to the source.
+        -- Re-add the FK as NOT VALID, then VALIDATE it separately. 
         fk_defs    := fk_defs    || format('ALTER TABLE %I.%I ADD CONSTRAINT %I %s NOT VALID; ALTER TABLE %I.%I VALIDATE CONSTRAINT %I',
                                             dep.dnsp, dep.dtable, dep.dconname, dep.dcondef,
                                             dep.dnsp, dep.dtable, dep.dconname);

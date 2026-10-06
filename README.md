@@ -29,6 +29,8 @@ This tool helps you migrate your Heroku Postgres database to [PlanetScale](https
 - [Typical timing by phase](#typical-timing-by-phase)
 - [Environment variables](#environment-variables)
 - [Faster initial copy (deferred index rebuild)](#faster-initial-copy-deferred-index-rebuild)
+
+- [pg_partman support](#pg_partman-support)
 - [What is Bucardo?](#what-is-bucardo)
 - [Can I connect this to a Heroku follower/replica?](#can-i-connect-this-to-a-heroku-followerreplica)
 - [Need help?](#need-help)
@@ -81,6 +83,8 @@ heroku pg:psql -a your-app-name -c "SELECT extname, extversion FROM pg_extension
 ```
 
 For each extension listed, enable it on your PlanetScale database before starting the migration. See the [PlanetScale Postgres extensions documentation](https://planetscale.com/docs/postgres/extensions) for supported extensions and how to enable them. If you need help, [contact us](https://planetscale.com/contact).
+
+If `pg_partman` is in that list, read [pg_partman support](#pg_partman-support) before you start -- it needs one manual step.
 
 ### 4. Check for blocking vacuum processes
 
@@ -137,7 +141,6 @@ docker run -d \
   -e PLANETSCALE_URL="postgresql://..." \
   -e PASSWORD="your-password" \
   -p 8080:8080 \
-  --user 1000:1000 \
   heroku-migrator
 # Optional index-rebuild tuning:
 #   -e INDEX_REBUILD_WORKERS=4 -e MAINTENANCE_WORK_MEM=1GB -e PARALLEL_MAINTENANCE_WORKERS=2
@@ -157,7 +160,7 @@ heroku pg:psql -a your-app-name -c "SELECT extname, extversion FROM pg_extension
 heroku pg:psql -a your-app-name -c "SELECT table_name, has_table_privilege(current_user, format('public.%I', table_name), 'SELECT,INSERT,UPDATE,DELETE') FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;"
 
 # 3) Optional table sanity snapshot
-heroku pg:psql -a your-app-name -c "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename;"
+heroku pg:psql -a your-app-name -c "SELECT schemaname || '.' || tablename FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY 1;"
 ```
 
 If table privileges are missing for your chosen `HEROKU_URL` user, the migration setup may work but end-to-end validation can be incomplete.
@@ -282,10 +285,11 @@ In either case, Bucardo's triggers stay on your Heroku database while paused, so
 
 ### Step 3: Switch traffic
 
-When the dashboard shows your databases are in sync, you're ready to cut over. Click **Switch Traffic** to block writes on your Heroku database. This runs a SQL `REVOKE` command that removes `INSERT`, `UPDATE`, and `DELETE` privileges from your Heroku database user:
+When the dashboard shows your databases are in sync, you're ready to cut over. Click **Switch Traffic** to block writes on your Heroku database. This runs a SQL `REVOKE` command that removes `INSERT`, `UPDATE`, and `DELETE` privileges from your Heroku database user, once for each schema being migrated:
 
 ```sql
 REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public FROM your_heroku_user;
+REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA your_other_schema FROM your_heroku_user;
 ```
 
 For production apps, consider enabling Heroku maintenance mode before clicking
@@ -414,6 +418,7 @@ How it works:
    `_ps_migrator` schema on the target, then drops them. **Primary keys are kept.** Drops use
    `RESTRICT` (never `CASCADE`); any index with a dependent that cannot be fully reconstructed
    is left in place and recorded as skipped, while the rest are still dropped.
+
 2. The initial copy runs against the index-light tables.
 3. When the copy finishes, **delta replication is paused** and the indexes are rebuilt in
    parallel (`INDEX_REBUILD_WORKERS` at a time). Progress and any failures are shown on the
@@ -437,6 +442,27 @@ data is copied.
 When `DISABLE_INDEX_DEFERRAL=true`, there is no post-copy rebuild, so
 `INDEX_REBUILD_WORKERS`, `MAINTENANCE_WORK_MEM`, and `PARALLEL_MAINTENANCE_WORKERS` have **no
 effect** and the dashboard hides the index-rebuild tuning control.
+
+## pg_partman support
+
+pg_partman is supported, with one manual step: pause pg_partman maintenance before you start, and resume it on PlanetScale after cutover. Everything else is automated. The migrator replicates your **leaf partitions** and recreates the partitioned parent through the schema copy. The `partman` schema is not replicated, because its config and template tables can't be.
+
+### Before you start: pause pg_partman maintenance
+
+**Pause the job that calls `partman.run_maintenance_proc()`** (usually a pg_cron entry) and leave it paused until after cutover. With pg_partman's default `automatic_maintenance = 'on'`, new partitions can appear on the source db, so an unpaused job during a long copy can quietly leave rows behind.
+
+You can leave pg_partman installed on your PlanetScale database if you've already set it up; the schema copy handles a schema that already exists. Letting the schema copy install it for you works too.
+
+### Your partition sets are re-registered automatically
+
+Right after the schema copy, the migrator reads your partition configuration from the source and recreates it on PlanetScale, so maintenance keeps working after cutover. 
+
+Two cases still need your attention, both reported in the Setup Log:
+
+- **Sub-partitioned sets.** pg_partman's own dump function covers single-level sets only, so if you use sub-partitioning (`partman.part_config_sub`) re-register those by hand after cutover.
+- **A partition set that failed to register on PlanetScale.** This shows as a warning in the Setup Log and does *not* stop the migration; all your data is still copied. Only pg_partman's settings for that table are missing on PlanetScale, so no new partitions will be created for it until you register it again with `partman.create_parent()` after cutover, using the same settings as on Heroku.
+
+Then resume maintenance on PlanetScale.
 
 ## What is Bucardo?
 
@@ -477,7 +503,6 @@ local and Heroku deployments are configured identically.
 ```bash
 docker build -t heroku-migrator .
 docker run -it \
-  --user 1000:1000 \
   -e HEROKU_URL="postgres://user:pass@host:5432/dbname?sslmode=disable" \
   -e PLANETSCALE_URL="postgresql://user:pass@host:5432/dbname?sslmode=disable" \
   -e PASSWORD="your-password" \
@@ -487,7 +512,7 @@ docker run -it \
 ```
 
 Notes:
-- `--user 1000:1000` runs as non-root (initdb refuses root). The entrypoint
+- The image runs as a non-root user by default (initdb refuses root). The entrypoint
   self-owns its data dir, so no volume/chown setup is needed for an ephemeral run.
 - **Index-rebuild tuning** (optional; identical on Heroku via `heroku config:set`):
   ```bash

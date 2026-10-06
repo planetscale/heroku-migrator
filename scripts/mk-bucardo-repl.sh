@@ -41,29 +41,51 @@ if [ -z "$PRIMARY" -o -z "$REPLICA" ]
 then usage 1
 fi
 
-# Copy the schema from the primary to the (soon to be) replica.
+# pg_partman can be installed in any schema, so resolve it once. quote_ident
+# makes it safe to interpolate below.
+PM_SCHEMA=$(psql "$PRIMARY" -A -t -c "
+  SELECT quote_ident(n.nspname)
+  FROM pg_extension e
+  JOIN pg_namespace n ON n.oid = e.extnamespace
+  WHERE e.extname = 'pg_partman';" 2>/dev/null | tr -d '[:space:]')
+
+# pg_partman's template tables have no primary key, so Bucardo refuses them.
+# With pg_partman in public they look like ordinary app tables, so
+# match them by name from part_config instead.
+PM_TEMPLATE_FILTER=""
+if [ -n "$PM_SCHEMA" ]; then
+  PM_TEMPLATE_FILTER="OR (n.nspname || '.' || c.relname) IN (
+        SELECT template_table FROM ${PM_SCHEMA}.part_config
+        WHERE template_table IS NOT NULL
+      )"
+fi
+
+# Copy the schema from the primary to the replica.
 if [ "$SKIP_SCHEMA" -eq 0 ]; then
   echo "Copying schema from primary to replica..."
 
-  # pg_dump 17 always emits "SET transaction_timeout = 0;", a GUC that only
-  # exists on PG17+. Strip it for older replicas, which would otherwise abort
-  # with "unrecognized configuration parameter".
-  EXCLUDE_PATTERN="^COMMENT ON EXTENSION "
+  EXCLUDE_PATTERN="^COMMENT ON EXTENSION |^CREATE TRIGGER bucardo_"
   REPLICA_VERSION_NUM=$(psql "$REPLICA" -Atc "SHOW server_version_num;")
   if [ "$REPLICA_VERSION_NUM" -lt 170000 ]; then
     EXCLUDE_PATTERN="$EXCLUDE_PATTERN|^SET transaction_timeout = 0;$"
   fi
 
-  pg_dump --no-owner --no-privileges --no-publications --no-subscriptions --schema-only "$PRIMARY" |
+  pg_dump --no-owner --no-privileges --no-publications --no-subscriptions --schema-only \
+    --exclude-schema=bucardo --exclude-schema=_ps_migrator --exclude-schema=pscale_extensions "$PRIMARY" |
+  sed -E "s/^CREATE SCHEMA (.+);$/CREATE SCHEMA IF NOT EXISTS \1;/" |
   grep -v -E "$EXCLUDE_PATTERN" |
   psql "$REPLICA" -a --set ON_ERROR_STOP=1
 else
   echo "Skipping schema copy (--skip-schema flag set)"
 fi
 
+# pg_partman keeps its partition sets in part_config, which the schema copy
+# creates empty: it carries the extension, not the extension's rows. Without
+# this the target has pg_partman installed, no partition sets registered, and
+# never creates another partition. Re-register them from the source.
+
 # Drop secondary/unique indexes so the initial COPY skips per-row index
-# maintenance; rebuild recipes are recorded and replayed once it finishes.
-# Only meaningful on a fresh schema copy.
+# maintenance
 if [ "$SKIP_SCHEMA" -eq 0 ]; then
   sh "$(dirname "$0")/drop-secondary-indexes.sh" --replica "$REPLICA"
 fi
@@ -82,9 +104,47 @@ bucardo add database "planetscale" \
   password="$(echo "$REPLICA" | cut -d ":" -f 3 | cut -d "@" -f 1)" \
   dbname="$(echo "$REPLICA" | cut -d "/" -f 4 | cut -d "?" -f 1)"
 
+bucardo update database planetscale dbconn='options=--transaction_timeout=0'
+bucardo update database heroku dbconn='options=--transaction_timeout=0'
+
 # Add all the sequences and tables to Bucardo.
 bucardo add all sequences --relgroup "planetscale_import"
 bucardo add all tables --relgroup "planetscale_import"
+
+# `add all tables` enrols every user table, including ones Bucardo cannot
+# replicate, and `bucardo add sync` fails. 
+# Subtract them here, while the sync does not exist yet: validate_sync is what
+# creates the triggers, so nothing is left behind on the source.
+# Keep this predicate in sync with migrated_relation_scope_sql in server.rb.
+NOT_REPLICATABLE=$(psql "$PRIMARY" -A -t -c "
+  SELECT n.nspname || '.' || c.relname
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind = 'r'
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'bucardo')
+    AND left(n.nspname, 3) <> 'pg_'
+    AND (
+      n.nspname IN (
+        SELECT en.nspname FROM pg_extension e
+        JOIN pg_namespace en ON en.oid = e.extnamespace
+        WHERE en.nspname NOT IN ('public', 'pg_catalog')
+      )
+      OR EXISTS (
+        SELECT 1 FROM pg_depend d
+        WHERE d.classid = 'pg_class'::regclass
+          AND d.objid = c.oid AND d.deptype = 'e'
+      )
+      OR NOT pg_catalog.has_table_privilege(current_user, c.oid, 'TRIGGER')
+      ${PM_TEMPLATE_FILTER}
+    )
+  ORDER BY 1;")
+
+if [ -n "$NOT_REPLICATABLE" ]; then
+  echo "Excluding tables Bucardo cannot replicate (extension-owned, or no TRIGGER privilege):"
+  echo "$NOT_REPLICATABLE" | sed "s/^/  /"
+
+  bucardo remove table $NOT_REPLICATABLE
+fi
 
 # Bucardo 5.6 cannot COPY into generated columns, so for each table that has
 # one, register an override selecting only the non-generated columns. The
@@ -135,9 +195,6 @@ fi
 # and it locks nothing.
 sh "$(dirname "$0")/add-track-indexes.sh" --primary "$PRIMARY"
 
-# Give Bucardo enough time to validate all tables across both databases.
-# The default 30s timeout is too short for databases with many tables, since
-# each table is inspected on both source and target over remote connections.
 bucardo set reload_config_timeout=180 log_level=verbose
 
 # Reload Bucardo, which starts the sync we just added.

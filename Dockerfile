@@ -6,9 +6,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TMP=/tmp
 ENV TMPDIR=/tmp
 ENV BUCARDO_VERSION=5.6.0
-ENV PATH="/usr/lib/postgresql/17/bin:$PATH"
+ENV PG_MAJOR=18
+ENV PATH="/usr/lib/postgresql/${PG_MAJOR}/bin:$PATH"
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 
-# Install PostgreSQL 17 and Bucardo dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       curl \
@@ -28,8 +30,8 @@ RUN apt-get update && \
       libdbd-pg-perl \
       libdbix-safe-perl \
       libpod-parser-perl \
-      postgresql-17 \
-      postgresql-plperl-17 \
+      postgresql-${PG_MAJOR} \
+      postgresql-plperl-${PG_MAJOR} \
       make \
       perl \
     && rm -rf /var/lib/apt/lists/*
@@ -61,5 +63,10 @@ COPY entrypoint.sh /opt/bucardo/entrypoint.sh
 RUN chmod +x /opt/bucardo/entrypoint.sh /opt/bucardo/scripts/*.sh
 
 EXPOSE ${PORT:-8080}
+
+RUN useradd -M -d /opt/bucardo -u 1000 -g 0 bucardo && \
+    chown -R bucardo:0 /opt/bucardo /var/run/bucardo /var/log/bucardo
+USER bucardo
+WORKDIR /opt/bucardo
 
 ENTRYPOINT ["/opt/bucardo/entrypoint.sh"]
