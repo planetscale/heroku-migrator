@@ -12,8 +12,7 @@ set -e
 # dependent we cannot fully reconstruct is left in place and marked 'skipped',
 # so the database can never hold an object we are unable to rebuild.
 #
-# Primary keys are deliberately kept: almost every FK needs them and they are
-# usually narrow, so dropping them is high churn for little gain.
+# Primary keys and the REPLICA IDENTITY USING INDEX are deliberately kept
 # =============================================================================
 
 usage() {
@@ -129,6 +128,7 @@ BEGIN
       AND i.indislive
       AND NOT i.indisprimary      -- keep primary keys
       AND NOT i.indisexclusion    -- keep exclusion constraints
+      AND NOT i.indisreplident    -- keep the REPLICA IDENTITY USING INDEX index
     ORDER BY n.nspname, c.relname, ic.relname
   LOOP
     unsafe     := false;
@@ -138,7 +138,7 @@ BEGIN
     fk_tables  := ARRAY[]::text[];
 
     -- Enumerate every object that depends on this index. A foreign key is the
-    -- only dependent we can fully reconstruct; 
+    -- only dependent we can fully reconstruct;
     FOR dep IN
       SELECT dcon.oid AS dconoid, dcon.contype AS dcontype, dcon.conname AS dconname,
              dn.nspname AS dnsp, dcl.relname AS dtable,
