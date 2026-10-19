@@ -357,6 +357,7 @@ MIGRATED_RELATION_SCOPE_SQL = <<~SQL.freeze
     WHERE d.classid = 'pg_class'::regclass
       AND d.objid = c.oid AND d.deptype = 'e'
   )
+  AND pg_catalog.has_table_privilege(current_user, c.oid, 'TRIGGER')
 SQL
 
 def relation_privilege_cmd(statement, username)
@@ -787,6 +788,13 @@ def bucardo_healthy_for_replication?(bucardo_status)
   true
 end
 
+def unbuilt_rebuild_objects
+  out = `psql "#{PLANETSCALE_URL}" -A -t -c "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE status IN ('pending','building','failed')" 2>/dev/null`.strip
+  out =~ /\A\d+\z/ ? out.to_i : 0
+rescue StandardError
+  0
+end
+
 def build_cutover_readiness(phase:, bucardo_status:)
   unless ["copying", "replicating", "switched"].include?(phase)
     return {
@@ -812,6 +820,9 @@ def build_cutover_readiness(phase:, bucardo_status:)
 
       soft_blockers << "replication_not_healthy" unless bucardo_healthy_for_replication?(bucardo_status)
     end
+
+    unbuilt = unbuilt_rebuild_objects
+    soft_blockers << "deferred_indexes_not_rebuilt (#{unbuilt})" if unbuilt > 0
   end
 
   if hard_blockers.any?
@@ -998,8 +1009,28 @@ rescue StandardError => e
   ""
 end
 
-def rebuilt_object_present?(schema, name)
-  out = `psql "#{PLANETSCALE_URL}" -A -t -c "SELECT 1 WHERE EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname = '#{sql_escape(name)}' AND n.nspname = '#{sql_escape(schema)}') OR EXISTS (SELECT 1 FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE con.conname = '#{sql_escape(name)}' AND n.nspname = '#{sql_escape(schema)}')" 2>/dev/null`.strip
+def rebuilt_object_present?(schema, table, name, kind)
+  con_exists = "EXISTS (SELECT 1 FROM pg_constraint con " \
+               "JOIN pg_class c ON c.oid = con.conrelid " \
+               "JOIN pg_namespace n ON n.oid = c.relnamespace " \
+               "WHERE con.conname = '#{sql_escape(name)}' " \
+               "AND c.relname = '#{sql_escape(table)}' " \
+               "AND n.nspname = '#{sql_escape(schema)}')"
+
+  predicate =
+    if kind == "fkey"
+      con_exists
+    else
+      "EXISTS (SELECT 1 FROM pg_class ic " \
+      "JOIN pg_namespace n ON n.oid = ic.relnamespace " \
+      "JOIN pg_index i ON i.indexrelid = ic.oid " \
+      "JOIN pg_class tc ON tc.oid = i.indrelid " \
+      "WHERE ic.relname = '#{sql_escape(name)}' " \
+      "AND tc.relname = '#{sql_escape(table)}' " \
+      "AND n.nspname = '#{sql_escape(schema)}') OR #{con_exists}"
+    end
+
+  out = `psql "#{PLANETSCALE_URL}" -A -t -c "SELECT 1 WHERE #{predicate}" 2>/dev/null`.strip
   out == "1"
 rescue StandardError
   false
@@ -1010,7 +1041,7 @@ def rebuild_one_index(id)
   schema, table, name, kind, size = meta_raw.chomp.split("\x1f", -1)
   rebuild_sql = `psql "#{PLANETSCALE_URL}" -A -t -c "SELECT rebuild_sql FROM _ps_migrator.dropped_indexes WHERE id=#{id}" 2>/dev/null`.strip
 
-  if rebuilt_object_present?(schema, name)
+  if rebuilt_object_present?(schema, table, name, kind)
     ps_migrate_query("UPDATE _ps_migrator.dropped_indexes SET status='done', finished_at=now(), error=NULL WHERE id=#{id}")
     log_rebuild("SKIP   #{table}.#{name}: already present on the target")
     return
@@ -1647,6 +1678,7 @@ server.mount_proc "/proceed-after-rebuild" do |req, res|
   end
 
   started_at = current["started_at"]
+  recreate_partman_config
   resume_output = `bucardo resume planetscale_import 2>&1`
   `bucardo kick planetscale_import 0 2>&1`
 

@@ -80,8 +80,11 @@ clear_db "$SRC"; clear_db "$TGT"
 
 log "Seeding the source: pg_partman in its own schema, app tables elsewhere..."
 psql "$SRC" -X -v ON_ERROR_STOP=1 >/dev/null <<SQL
-DROP ROLE IF EXISTS $APP_ROLE;
-CREATE ROLE $APP_ROLE LOGIN PASSWORD '$APP_PASS';
+DO \$\$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$APP_ROLE') THEN
+    CREATE ROLE $APP_ROLE LOGIN PASSWORD '$APP_PASS';
+  END IF;
+END \$\$;
 GRANT CREATE, CONNECT ON DATABASE $(psql "$SRC" -X -A -t -c "SELECT current_database()" | tr -d '[:space:]') TO $APP_ROLE;
 ALTER SCHEMA public OWNER TO $APP_ROLE;
 
@@ -130,6 +133,12 @@ SELECT partman.create_parent(
   p_start_partition := '1000000'
 );
 SQL
+
+psql "$SRC" -X -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
+CREATE TABLE analytics.locked_down (session_id text, url text);
+GRANT SELECT, INSERT, UPDATE, DELETE ON analytics.locked_down TO $APP_ROLE;
+SQL
+
 APP_URL="$(as_app "$SRC")"
 
 # --- 1. the two predicates must be exact complements -------------------------
@@ -178,11 +187,14 @@ assert_eq "included + excluded partition every user table" \
 assert_eq "no relation is both included and excluded" "" "$(comm -12 <(echo "$INCLUDED") <(echo "$EXCLUDED"))"
 
 # --- 2. the exclusion list is exactly pg_partman's tables --------------------
-assert_eq "exclusion list is exactly pg_partman's own tables" \
-  "partman.part_config
+assert_eq "exclusion list is pg_partman's tables plus the no-TRIGGER table" \
+  "analytics.locked_down
+partman.part_config
 partman.part_config_sub
 partman.template_public_events
 partman.template_public_ledger" "$EXCLUDED"
+assert_eq "the no-TRIGGER app table is out of replication scope" "" \
+  "$(echo "$INCLUDED" | grep '^analytics\.locked_down$' || true)"
 assert_eq "app tables in a custom schema stay in scope" "analytics.rollup" \
   "$(echo "$INCLUDED" | grep '^analytics\.rollup$')"
 
@@ -201,6 +213,8 @@ RUBYSCRIPT
 NOPK=$(psql "$APP_URL" -X -A -t -c "$PK_SQL" | sed '/^$/d' | sort)
 assert_eq "preflight flags the keyless table outside public" "analytics.clickstream" "$NOPK"
 assert_eq "preflight does not flag pg_partman's keyless templates" "" "$(echo "$NOPK" | grep 'template_' || true)"
+assert_eq "preflight does not flag the keyless no-TRIGGER table" "" \
+  "$(echo "$NOPK" | grep '^analytics\.locked_down$' || true)"
 
 # --- 4. schema copy against a target that already has pg_partman ------------
 log "Pre-installing pg_partman on the target, then running the schema copy..."
@@ -347,7 +361,8 @@ else
 fi
 assert_eq "partman replay lives in its own script" "1" \
   "$([ -f "$PARTMAN_SCRIPT" ] && echo 1 || echo 0)"
-assert_eq "server.rb invokes the replay after the copy" "2" \
+
+assert_eq "server.rb invokes the replay on every post-copy path" "3" \
   "$(grep -c '^ *recreate_partman_config$' "$SERVER_RB")"
 if ruby -e 'b=File.read(ARGV[0])[/mount_proc "\/reset".*?^end$/m]; exit(b.include?("run_bucardo_teardown") ? 0 : 1)' "$SERVER_RB"; then
   pass "/reset tears down Bucardo"

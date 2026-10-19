@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS _ps_migrator.dropped_indexes (
   error       text,
   started_at  timestamptz,
   finished_at timestamptz,
-  UNIQUE (schemaname, objectname, kind)
+  UNIQUE (schemaname, tablename, objectname, kind)
 );
 
 DO $do$

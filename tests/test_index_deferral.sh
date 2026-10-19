@@ -75,7 +75,11 @@ reset_schema() {
       DROP TABLE IF EXISTS child CASCADE;
       DROP TABLE IF EXISTS parent CASCADE;
       DROP TABLE IF EXISTS nopk CASCADE;
-      DROP TABLE IF EXISTS replident CASCADE;" >/dev/null
+      DROP TABLE IF EXISTS replident CASCADE;
+      DROP TABLE IF EXISTS fkdup_c1 CASCADE;
+      DROP TABLE IF EXISTS fkdup_c2 CASCADE;
+      DROP TABLE IF EXISTS fkdup_p1 CASCADE;
+      DROP TABLE IF EXISTS fkdup_p2 CASCADE;" >/dev/null
 }
 
 seed_schema() {
@@ -112,6 +116,18 @@ seed_schema() {
     );
     CREATE UNIQUE INDEX replident_uuid_uidx ON replident (uuid);
     ALTER TABLE replident REPLICA IDENTITY USING INDEX replident_uuid_uidx;  -- replica identity: kept
+
+    -- Two FKs sharing a name in one schema. Postgres allows it (pg_constraint is
+    -- unique per table, not per schema), so the registry must key on the table
+    -- too or the second is dropped with no rebuild recipe recorded.
+    CREATE TABLE fkdup_p1 (code text NOT NULL);
+    CREATE UNIQUE INDEX fkdup_p1_code_uq ON fkdup_p1 (code);
+    CREATE TABLE fkdup_p2 (code text NOT NULL);
+    CREATE UNIQUE INDEX fkdup_p2_code_uq ON fkdup_p2 (code);
+    CREATE TABLE fkdup_c1 (id int PRIMARY KEY, code text);
+    CREATE TABLE fkdup_c2 (id int PRIMARY KEY, code text);
+    ALTER TABLE fkdup_c1 ADD CONSTRAINT fk_shared_name FOREIGN KEY (code) REFERENCES fkdup_p1 (code);
+    ALTER TABLE fkdup_c2 ADD CONSTRAINT fk_shared_name FOREIGN KEY (code) REFERENCES fkdup_p2 (code);
 
     INSERT INTO parent (id, email, code, name) VALUES
       (1,'a@x.com','C1','Alice'), (2,'b@x.com','C2','Bob'), (3,'c@x.com','C3','Carol');
@@ -167,9 +183,13 @@ reg_total=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes")
 reg_fk=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE kind='fkey' AND pass=2")
 reg_unique=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE kind='unique'")
 reg_index=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE kind='index'")
-assert_eq "registry total rows" "7" "$reg_total"          # 3 secondary + 3 unique + 1 fk
-assert_eq "registry FK rows (pass 2)" "1" "$reg_fk"
-assert_eq "registry unique rows" "3" "$reg_unique"
+assert_eq "registry total rows" "11" "$reg_total"         # 3 secondary + 5 unique + 3 fk
+assert_eq "both same-named FKs recorded, not just one" "2" \
+  "$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE objectname='fk_shared_name'")"
+assert_eq "no same-named FK dropped without a recipe" "0" \
+  "$(q "SELECT count(*) FROM pg_constraint WHERE conname='fk_shared_name'")"
+assert_eq "registry FK rows (pass 2)" "3" "$reg_fk"
+assert_eq "registry unique rows" "5" "$reg_unique"
 assert_eq "registry secondary index rows" "3" "$reg_index"
 
 # verify no CASCADE in the script
@@ -195,7 +215,9 @@ else
 fi
 
 done_rows=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE status='done'")
-assert_eq "all registry rows rebuilt (done)" "7" "$done_rows"
+assert_eq "all registry rows rebuilt (done)" "11" "$done_rows"
+assert_eq "both same-named FKs rebuilt" "2" \
+  "$(q "SELECT count(*) FROM pg_constraint WHERE conname='fk_shared_name'")"
 
 # constraints actually enforced again
 assert_has_constraint "parent_email_key"
@@ -224,7 +246,7 @@ run_rebuild
 failed_rows=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE status='failed'")
 done_rows=$(q "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE status='done'")
 assert_eq "exactly one index failed" "1" "$failed_rows"
-assert_eq "the other six rebuilt successfully" "6" "$done_rows"
+assert_eq "the others rebuilt successfully" "10" "$done_rows"
 assert_contains_index "child_note_idx"   # an unrelated index still built
 assert_has_constraint "child_parent_fk"  # FK still rebuilt despite the failure
 assert_no_index "parent_name_idx"        # the failed one is absent (as expected)
