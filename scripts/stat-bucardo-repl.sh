@@ -1,4 +1,12 @@
+#!/bin/sh
 set -e
+# =============================================================================
+# stat-bucardo-repl.sh -- report replication status.
+#
+# Prints the schema of both databases, then parses `bucardo status` into the
+# flat KEY: VALUE lines the status server reads (STATUS, INITIAL COPY PHASE,
+# STATE, LAST ERROR, ROWS CHANGED IN LAST SYNC, SECONDS SINCE LAST SYNC).
+# =============================================================================
 
 usage() {
   printf "Usage: sh %s --primary \e[4mconninfo\e[0m --replica \e[4mconninfo\e[0m\n" "$(basename "$0")" >&2
@@ -33,7 +41,7 @@ export PSQL_PAGER=""
 TMP="$(mktemp -d)"
 trap "rm -f -r \"$TMP\"" EXIT INT QUIT TERM
 
-# Inspect the schema on the primary and replica.
+# Schema of both databases.
 echo >&2
 echo "##############################" >&2
 echo "# PRIMARY AND REPLICA SCHEMA #" >&2

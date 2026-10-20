@@ -1,26 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-# ---------------------------------------------------------------------------
-# End-to-end migration test against real Heroku Postgres and PlanetScale.
+# =============================================================================
+# test_e2e.sh -- full migration against real Heroku Postgres and PlanetScale.
+#
+# Unlike every other test here, this one is not vendor-neutral: it drives the
+# heroku and pscale CLIs and creates and destroys real cloud resources, which
+# cost money. Point it at throwaway ones.
 #
 # Prerequisites:
-#   - heroku CLI authenticated
-#   - pscale CLI authenticated (org: mike)
+#   - heroku and pscale CLIs, both authenticated
 #   - psql available locally
-#   - Source Heroku database has tables with data
+#   - a source Heroku database that already has tables with data
 #
 # Usage:
-#   bash test/test_e2e.sh
-# ---------------------------------------------------------------------------
+#   HEROKU_SRC_APP=my-source-app \
+#   PS_ORG=my-org PS_DATABASE=my-db \
+#     bash tests/test_e2e.sh
+# =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-HEROKU_SRC_APP="ps-migrate-test-src"
-PS_DATABASE="import-test"
-PS_BRANCH="main"
-PS_ORG="mike"
+# No defaults: these name real accounts and databases, so they must be given.
+HEROKU_SRC_APP="${HEROKU_SRC_APP:?set HEROKU_SRC_APP to the source Heroku app}"
+PS_DATABASE="${PS_DATABASE:?set PS_DATABASE to the target PlanetScale database}"
+PS_ORG="${PS_ORG:?set PS_ORG to your PlanetScale organization}"
+PS_BRANCH="${PS_BRANCH:-main}"
 TEST_PASSWORD="e2e-test-$(date +%s)"
 HEROKU_APP=""
 PS_ROLE_NAME=""
@@ -108,6 +113,23 @@ wait_for_phase() {
 
 heroku_psql() {
   psql "$HEROKU_URL" -A -t -c "$1" 2>&1
+}
+
+ps_psql() {
+  psql "$PS_URL" -A -t -c "$1" 2>&1
+}
+
+# Canonical, order-stable set of public indexes + constraints for a connection.
+# Used to assert the target's final schema matches the source after rebuild.
+schema_fingerprint() {
+  # NOT NULL constraints (contype='n') are excluded: the deferred-index feature
+  # never touches them and pg_dump versions name them inconsistently across PG versions.
+  psql "$1" -X -A -t -c "
+    SELECT 'IDX '||indexname||' :: '||indexdef FROM pg_indexes WHERE schemaname='public'
+    UNION ALL
+    SELECT 'CON '||conname||' :: '||pg_get_constraintdef(oid)
+      FROM pg_constraint WHERE connamespace='public'::regnamespace AND contype <> 'n'
+    ORDER BY 1" 2>/dev/null
 }
 
 # === SETUP ==================================================================
@@ -208,6 +230,29 @@ if wait_for_phase "ready_to_copy" 300; then
   pass "Schema copied, ready to copy data"
 fi
 
+# === DEFERRED INDEXES: dropped before copy ==================================
+# Skipped automatically if index deferral was disabled for this run.
+DEFERRAL_ON=1
+if [ "$(heroku config:get DISABLE_INDEX_DEFERRAL -a "$HEROKU_APP" 2>/dev/null)" = "true" ]; then
+  DEFERRAL_ON=0
+fi
+
+if [ "$DEFERRAL_ON" = "1" ]; then
+  step "Verify secondary indexes were dropped on the target before copy"
+  reg_rows=$(ps_psql "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE status='pending'" | tr -d '[:space:]')
+  if [ -n "$reg_rows" ] && [ "$reg_rows" -ge 0 ] 2>/dev/null; then
+    pass "Deferred-index registry exists (${reg_rows:-0} indexes pending rebuild)"
+  else
+    fail "Expected _ps_migrator.dropped_indexes registry on target"
+  fi
+  # Primary keys must always survive (Bucardo needs them; we never drop them).
+  pk_missing=$(ps_psql "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='r' AND NOT EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=c.oid AND i.indisprimary) AND EXISTS (SELECT 1 FROM pg_index i2 WHERE i2.indrelid=c.oid)" | tr -d '[:space:]')
+  # (informational: just ensure the registry never recorded a primary-key drop)
+  pk_dropped=$(ps_psql "SELECT count(*) FROM _ps_migrator.dropped_indexes d JOIN pg_constraint con ON con.conname=d.objectname AND con.contype='p'" | tr -d '[:space:]')
+  assert_zero() { if [ "${1:-0}" = "0" ]; then pass "$2"; else fail "$2 (got $1)"; fi; }
+  [ "${pk_dropped:-0}" = "0" ] && pass "No primary key was recorded for drop" || fail "A primary key was dropped ($pk_dropped)"
+fi
+
 # === START COPY =============================================================
 
 step "Start data copy"
@@ -223,6 +268,28 @@ fi
 step "Wait for replication (phase=replicating)"
 if wait_for_phase "replicating" 600; then
   pass "Initial copy complete, replication active"
+fi
+
+# === DEFERRED INDEXES: rebuilt after copy, schema matches source ============
+if [ "$DEFERRAL_ON" = "1" ]; then
+  step "Verify all deferred indexes were rebuilt"
+  not_done=$(ps_psql "SELECT count(*) FROM _ps_migrator.dropped_indexes WHERE status NOT IN ('done','skipped')" | tr -d '[:space:]')
+  failed_list=$(ps_psql "SELECT string_agg(tablename||'.'||objectname||' ('||coalesce(error,'')||')', '; ') FROM _ps_migrator.dropped_indexes WHERE status='failed'")
+  if [ "${not_done:-1}" = "0" ]; then
+    pass "All deferred indexes rebuilt (none left pending/failed)"
+  else
+    fail "Some indexes did not rebuild: $failed_list"
+  fi
+
+  step "Verify target index + constraint set matches the source"
+  SRC_FP="$(schema_fingerprint "$HEROKU_URL")"
+  TGT_FP="$(schema_fingerprint "$PS_URL")"
+  if [ "$SRC_FP" = "$TGT_FP" ]; then
+    pass "Target schema (indexes + constraints) is identical to source"
+  else
+    fail "Target schema differs from source after rebuild:"
+    diff <(printf '%s\n' "$SRC_FP") <(printf '%s\n' "$TGT_FP") || true
+  fi
 fi
 
 # === VERIFY READINESS =======================================================
@@ -345,6 +412,14 @@ if [ "$trigger_count" = "0" ]; then
   pass "No Bucardo triggers remain on Heroku"
 else
   fail "$trigger_count Bucardo triggers still exist on Heroku"
+fi
+
+step "Verify deferred-index registry was removed from the target"
+reg_exists=$(ps_psql "SELECT count(*) FROM information_schema.schemata WHERE schema_name='_ps_migrator'" | tr -d '[:space:]')
+if [ "${reg_exists:-0}" = "0" ]; then
+  pass "_ps_migrator schema dropped from target"
+else
+  fail "_ps_migrator schema still present on target after cleanup"
 fi
 
 echo ""

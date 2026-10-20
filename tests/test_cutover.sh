@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-# ---------------------------------------------------------------------------
-# Local mock test for cutover readiness logic.
-# Starts the status server with a fake bucardo binary and temp state dir,
-# then exercises all readiness scenarios via curl.
-# ---------------------------------------------------------------------------
+# =============================================================================
+# test_cutover.sh -- cutover readiness and recovery endpoints.
+#
+# Starts the status server against a fake bucardo binary and a temp state dir,
+# then drives every readiness scenario over HTTP. Needs no database.
+#
+# Usage: bash tests/test_cutover.sh
+# =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -328,6 +330,57 @@ write_status << 'EOF'
 EOF
 
 http_check POST /retry 409
+
+# === SCENARIO 9: Setup failure fails closed =================================
+#
+# add-track-indexes.sh runs inside mk-bucardo-repl.sh under `set -e`, so if it
+# cannot index the source's Bucardo track tables the whole setup exits non-zero.
+# This asserts the migration then lands in a visible error state instead of
+# advancing to ready_to_copy -- the fail-closed guarantee the wiring relies on.
+
+log "Scenario 9: Replication setup failure fails closed"
+
+write_status << 'EOF'
+{"phase":"waiting","state":"ready","message":"Ready to start migration.","error":null}
+EOF
+rm -f "$TEST_STATE_DIR/mk_bucardo_repl_called" "$TEST_STATE_DIR/call_log"
+echo 1 > "$TEST_STATE_DIR/mk_bucardo_repl_exit"
+
+http_check POST /start-migration 200 '"success":true'
+
+phase=""
+for _ in $(seq 1 40); do
+  phase=$(get_status_field "phase")
+  [ "$phase" = "error" ] && break
+  sleep 0.5
+done
+
+if [ "$phase" = "error" ]; then
+  pass "Setup failure -> phase=error (never reaches ready_to_copy)"
+else
+  fail "Setup failure -> phase=$phase (expected error)"
+fi
+
+state=$(get_status_field "state")
+if [ "$state" = "setup_failed" ]; then
+  pass "Setup failure -> state=setup_failed"
+else
+  fail "Setup failure -> state=$state (expected setup_failed)"
+fi
+
+if get_status_field "error" | grep -q "FAKE_SETUP_FAILURE"; then
+  pass "Setup script stderr surfaced in the error field"
+else
+  fail "Setup script stderr missing from error field: $(get_status_field "error")"
+fi
+
+if [ -f "$TEST_STATE_DIR/mk_bucardo_repl_called" ]; then
+  pass "mk-bucardo-repl.sh ran (failure came from setup, not earlier)"
+else
+  fail "mk-bucardo-repl.sh never ran"
+fi
+
+echo 0 > "$TEST_STATE_DIR/mk_bucardo_repl_exit"
 
 # === Summary ================================================================
 

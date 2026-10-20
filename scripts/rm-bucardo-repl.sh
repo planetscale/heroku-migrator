@@ -1,4 +1,12 @@
+#!/bin/sh
 set -e
+# =============================================================================
+# rm-bucardo-repl.sh -- tear down replication.
+#
+# Deregisters the databases from Bucardo's catalog, removes the replication
+# triggers it installed on the primary, and drops both migrator schemas. Every
+# step is best-effort so a partially-configured run can still be cleaned up.
+# =============================================================================
 
 usage() {
   printf "Usage: sh %s --primary \e[4mconninfo\e[0m --replica \e[4mconninfo\e[0m\n" "$(basename "$0")" >&2
@@ -28,7 +36,7 @@ if [ -z "$PRIMARY" -o -z "$REPLICA" ]
 then usage 1
 fi
 
-# Bucardo metadata may be partially missing after restarts; keep teardown idempotent.
+# Metadata may be partially missing after a restart, so ignore failures.
 bucardo remove sync "planetscale_import" 2>/dev/null || true
 bucardo list tables 2>/dev/null | tr -s " " | cut -d " " -f 3 | xargs -r bucardo remove table 2>/dev/null || true
 bucardo list sequences 2>/dev/null | tr -s " " | cut -d " " -f 2 | xargs -r bucardo remove sequence 2>/dev/null || true
@@ -38,6 +46,7 @@ bucardo remove database "planetscale" 2>/dev/null || true
 bucardo remove database "heroku" 2>/dev/null || true
 bucardo stop 2>/dev/null || true
 
+# Generate a DROP for each trigger Bucardo left behind, then run them.
 psql "$PRIMARY" -A -t -c "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname)
 FROM pg_trigger t
 JOIN pg_class c ON c.oid = t.tgrelid
@@ -46,3 +55,7 @@ WHERE t.tgname LIKE 'bucardo_%'
   AND n.nspname <> 'bucardo';" | psql "$PRIMARY" -a
 
 psql "$PRIMARY" -c "DROP SCHEMA IF EXISTS bucardo CASCADE;"
+
+# The deferred-index registry. CASCADE is scoped to our own schema, never to
+# customer objects, and a failure here must not block teardown.
+psql "$REPLICA" -c "DROP SCHEMA IF EXISTS _ps_migrator CASCADE;" 2>/dev/null || true

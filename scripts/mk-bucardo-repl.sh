@@ -1,4 +1,12 @@
+#!/bin/sh
 set -e
+# =============================================================================
+# mk-bucardo-repl.sh -- configure replication from primary to replica.
+#
+# Copies the schema, drops the target's secondary indexes for a faster initial
+# copy, registers both databases and all relations with Bucardo, then starts
+# the sync. Re-runnable: --skip-schema resumes without re-copying the schema.
+# =============================================================================
 
 usage() {
   printf "Usage: sh %s --primary \e[4mconninfo\e[0m --replica \e[4mconninfo\e[0m [--skip-schema] [--no-initial-copy]\n" "$(basename "$0")" >&2
@@ -33,38 +41,62 @@ if [ -z "$PRIMARY" -o -z "$REPLICA" ]
 then usage 1
 fi
 
-# Copy the schema from the primary to the (soon to be) replica.
+# pg_partman can be installed in any schema, so resolve it once. quote_ident
+# makes it safe to interpolate below.
+PM_SCHEMA=$(psql "$PRIMARY" -A -t -c "
+  SELECT quote_ident(n.nspname)
+  FROM pg_extension e
+  JOIN pg_namespace n ON n.oid = e.extnamespace
+  WHERE e.extname = 'pg_partman';" 2>/dev/null | tr -d '[:space:]')
+
+# pg_partman's template tables have no primary key, so Bucardo refuses them.
+# With pg_partman in public they look like ordinary app tables, so
+# match them by name from part_config instead.
+PM_TEMPLATE_FILTER=""
+if [ -n "$PM_SCHEMA" ]; then
+  PM_TEMPLATE_FILTER="OR (n.nspname || '.' || c.relname) IN (
+        SELECT template_table FROM ${PM_SCHEMA}.part_config
+        WHERE template_table IS NOT NULL
+      )"
+fi
+
+# Copy the schema from the primary to the replica.
 if [ "$SKIP_SCHEMA" -eq 0 ]; then
   echo "Copying schema from primary to replica..."
 
-  # This image's pg_dump is PostgreSQL 17, whose schema-only dumps always
-  # start with "SET transaction_timeout = 0;". That GUC only exists on
-  # PostgreSQL 17+, so psql aborts with "unrecognized configuration
-  # parameter" if the replica is running an older major version. Strip the
-  # line in that case; PG17+ replicas are unaffected.
-  EXCLUDE_PATTERN="^COMMENT ON EXTENSION "
+  EXCLUDE_PATTERN="^COMMENT ON EXTENSION |^CREATE TRIGGER bucardo_"
   REPLICA_VERSION_NUM=$(psql "$REPLICA" -Atc "SHOW server_version_num;")
   if [ "$REPLICA_VERSION_NUM" -lt 170000 ]; then
     EXCLUDE_PATTERN="$EXCLUDE_PATTERN|^SET transaction_timeout = 0;$"
   fi
 
-  pg_dump --no-owner --no-privileges --no-publications --no-subscriptions --schema-only "$PRIMARY" |
+  pg_dump --no-owner --no-privileges --no-publications --no-subscriptions --schema-only \
+    --exclude-schema=bucardo --exclude-schema=_ps_migrator --exclude-schema=pscale_extensions "$PRIMARY" |
+  sed -E "s/^CREATE SCHEMA (.+);$/CREATE SCHEMA IF NOT EXISTS \1;/" |
   grep -v -E "$EXCLUDE_PATTERN" |
   psql "$REPLICA" -a --set ON_ERROR_STOP=1
 else
   echo "Skipping schema copy (--skip-schema flag set)"
 fi
 
-# Add the primary (Heroku) database to Bucardo. Parse the subset of connection
-# information Bucardo needs from Heroku's URL-formatted connection information.
+# pg_partman keeps its partition sets in part_config, which the schema copy
+# creates empty: it carries the extension, not the extension's rows. Without
+# this the target has pg_partman installed, no partition sets registered, and
+# never creates another partition. Re-register them from the source.
+
+# Drop secondary/unique indexes so the initial COPY skips per-row index
+# maintenance
+if [ "$SKIP_SCHEMA" -eq 0 ]; then
+  sh "$(dirname "$0")/drop-secondary-indexes.sh" --replica "$REPLICA"
+fi
+
+# Register both databases, parsing the fields Bucardo needs out of each URL.
 bucardo add database "heroku" \
   host="$(echo "$PRIMARY" | cut -d "@" -f 2 | cut -d ":" -f 1)" \
   user="$(echo "$PRIMARY" | cut -d "/" -f 3 | cut -d ":" -f 1)" \
   password="$(echo "$PRIMARY" | cut -d ":" -f 3 | cut -d "@" -f 1)" \
   dbname="$(echo "$PRIMARY" | cut -d "/" -f 4 | cut -d "?" -f 1)"
 
-# Add the (soon to be) replica (PlanetScale) database to Bucardo. Parse the
-# connection information Bucardo needs from the URL-formatted connection string.
 bucardo add database "planetscale" \
   host="$(echo "$REPLICA" | cut -d "@" -f 2 | cut -d ":" -f 1)" \
   port="$(echo "$REPLICA" | cut -d "@" -f 2 | cut -d ":" -f 2 | cut -d "/" -f 1)" \
@@ -72,17 +104,51 @@ bucardo add database "planetscale" \
   password="$(echo "$REPLICA" | cut -d ":" -f 3 | cut -d "@" -f 1)" \
   dbname="$(echo "$REPLICA" | cut -d "/" -f 4 | cut -d "?" -f 1)"
 
+bucardo update database planetscale dbconn='options=--transaction_timeout=0'
+bucardo update database heroku dbconn='options=--transaction_timeout=0'
+
 # Add all the sequences and tables to Bucardo.
 bucardo add all sequences --relgroup "planetscale_import"
 bucardo add all tables --relgroup "planetscale_import"
 
-# Bucardo 5.6 does not filter out PostgreSQL generated columns when issuing
-# COPY against the target, which fails with "column ... is a generated column /
-# Generated columns cannot be used in COPY". For every table that has at least
-# one generated column, register a customcols entry against the planetscale db
-# that selects only the non-generated columns. The target already has the
-# generation expression (it came across via pg_dump --schema-only), so Postgres
-# recomputes the value on insert.
+# `add all tables` enrols every user table, including ones Bucardo cannot
+# replicate, and `bucardo add sync` fails. 
+# Subtract them here, while the sync does not exist yet: validate_sync is what
+# creates the triggers, so nothing is left behind on the source.
+# Keep this predicate in sync with migrated_relation_scope_sql in server.rb.
+NOT_REPLICATABLE=$(psql "$PRIMARY" -A -t -c "
+  SELECT n.nspname || '.' || c.relname
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind = 'r'
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'bucardo')
+    AND left(n.nspname, 3) <> 'pg_'
+    AND (
+      n.nspname IN (
+        SELECT en.nspname FROM pg_extension e
+        JOIN pg_namespace en ON en.oid = e.extnamespace
+        WHERE en.nspname NOT IN ('public', 'pg_catalog')
+      )
+      OR EXISTS (
+        SELECT 1 FROM pg_depend d
+        WHERE d.classid = 'pg_class'::regclass
+          AND d.objid = c.oid AND d.deptype = 'e'
+      )
+      OR NOT pg_catalog.has_table_privilege(current_user, c.oid, 'TRIGGER')
+      ${PM_TEMPLATE_FILTER}
+    )
+  ORDER BY 1;")
+
+if [ -n "$NOT_REPLICATABLE" ]; then
+  echo "Excluding tables Bucardo cannot replicate (extension-owned, or no TRIGGER privilege):"
+  echo "$NOT_REPLICATABLE" | sed "s/^/  /"
+
+  bucardo remove table $NOT_REPLICATABLE
+fi
+
+# Bucardo 5.6 cannot COPY into generated columns, so for each table that has
+# one, register an override selecting only the non-generated columns. The
+# target keeps the generation expression and recomputes the value on insert.
 GENERATED_TABLES=$(psql "$PRIMARY" -A -t -F"|" -c "
   SELECT DISTINCT n.nspname, c.relname
   FROM pg_attribute a
@@ -124,9 +190,11 @@ else
   bucardo add sync "planetscale_import" dbs="heroku,planetscale" onetimecopy=0 relgroup="planetscale_import"
 fi
 
-# Give Bucardo enough time to validate all tables across both databases.
-# The default 30s timeout is too short for databases with many tables, since
-# each table is inspected on both source and target over remote connections.
+# `bucardo add sync` created the source-side track tables; `bucardo reload`
+# below starts the sync. Index them here, while they are still empty: instant,
+# and it locks nothing.
+sh "$(dirname "$0")/add-track-indexes.sh" --primary "$PRIMARY"
+
 bucardo set reload_config_timeout=180 log_level=verbose
 
 # Reload Bucardo, which starts the sync we just added.

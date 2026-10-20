@@ -1,11 +1,16 @@
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
+# TMPDIR is what Perl/glibc honor on Linux (TMP is the Windows name); Bucardo
+# (Perl) needs it set or temp-dir resolution can fail.
 ENV TMP=/tmp
+ENV TMPDIR=/tmp
 ENV BUCARDO_VERSION=5.6.0
-ENV PATH="/usr/lib/postgresql/17/bin:$PATH"
+ENV PG_MAJOR=18
+ENV PATH="/usr/lib/postgresql/${PG_MAJOR}/bin:$PATH"
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 
-# Install PostgreSQL 17 and Bucardo dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       curl \
@@ -25,8 +30,8 @@ RUN apt-get update && \
       libdbd-pg-perl \
       libdbix-safe-perl \
       libpod-parser-perl \
-      postgresql-17 \
-      postgresql-plperl-17 \
+      postgresql-${PG_MAJOR} \
+      postgresql-plperl-${PG_MAJOR} \
       make \
       perl \
     && rm -rf /var/lib/apt/lists/*
@@ -41,9 +46,12 @@ RUN curl -L -o /tmp/bucardo-${BUCARDO_VERSION}.tar.gz \
     make install && \
     rm -rf /tmp/bucardo-*
 
-# Create writable directories for runtime use (Heroku runs as a random non-root UID)
+# Writable dirs for runtime (Heroku runs as a random non-root UID).
+# /tmp must be 1777 (sticky), not 777: Ruby's Dir.tmpdir rejects a non-sticky
+# world-writable temp dir, which breaks Dir.mktmpdir.
 RUN mkdir -p /var/run/bucardo /var/log/bucardo /opt/bucardo/pgdata /opt/bucardo/state && \
-    chmod 777 /var/run/bucardo /var/log/bucardo /opt/bucardo/pgdata /opt/bucardo/state /opt/bucardo /tmp && \
+    chmod 777 /var/run/bucardo /var/log/bucardo /opt/bucardo/pgdata /opt/bucardo/state /opt/bucardo && \
+    chmod 1777 /tmp && \
     echo '' > /etc/bucardorc && chmod 666 /etc/bucardorc && \
     chmod 666 /etc/passwd
 
@@ -55,5 +63,10 @@ COPY entrypoint.sh /opt/bucardo/entrypoint.sh
 RUN chmod +x /opt/bucardo/entrypoint.sh /opt/bucardo/scripts/*.sh
 
 EXPOSE ${PORT:-8080}
+
+RUN useradd -M -d /opt/bucardo -u 1000 -g 0 bucardo && \
+    chown -R bucardo:0 /opt/bucardo /var/run/bucardo /var/log/bucardo
+USER bucardo
+WORKDIR /opt/bucardo
 
 ENTRYPOINT ["/opt/bucardo/entrypoint.sh"]
